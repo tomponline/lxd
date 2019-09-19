@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
+	"github.com/linuxkit/virtsock/pkg/vsock"
 	"golang.org/x/sys/unix"
 
 	"github.com/lxc/lxd/lxd/cluster"
@@ -350,16 +352,6 @@ func containerExecPost(d *Daemon, r *http.Request) Response {
 	project := projectParam(r)
 	name := mux.Vars(r)["name"]
 
-	post := api.InstanceExecPost{}
-	buf, err := ioutil.ReadAll(r.Body)
-	if err != nil {
-		return BadRequest(err)
-	}
-
-	if err := json.Unmarshal(buf, &post); err != nil {
-		return BadRequest(err)
-	}
-
 	// Forward the request if the container is remote.
 	cert := d.endpoints.NetworkCert()
 	client, err := cluster.ConnectIfContainerIsRemote(d.cluster, project, name, cert, instanceType)
@@ -368,6 +360,16 @@ func containerExecPost(d *Daemon, r *http.Request) Response {
 	}
 
 	if client != nil {
+		post := api.InstanceExecPost{}
+		buf, err := ioutil.ReadAll(r.Body)
+		if err != nil {
+			return BadRequest(err)
+		}
+
+		if err := json.Unmarshal(buf, &post); err != nil {
+			return BadRequest(err)
+		}
+
 		url := fmt.Sprintf("/containers/%s/exec?project=%s", name, project)
 		op, _, err := client.RawOperation("POST", url, post, "")
 		if err != nil {
@@ -389,6 +391,35 @@ func containerExecPost(d *Daemon, r *http.Request) Response {
 
 	if inst.IsFrozen() {
 		return BadRequest(fmt.Errorf("Container is frozen"))
+	}
+
+	if instanceType == instance.TypeVM {
+		// Forward the request to the VM
+		client := http.Client{
+			Transport: &http.Transport{
+				Dial: func(network, addr string) (net.Conn, error) {
+					return vsock.Dial(uint32(inst.(*vmQemu).vsockID()), 8443)
+				},
+			},
+		}
+
+		resp, err := client.Post("http://vm.socket/1.0/exec", "application/json", r.Body)
+		if err != nil {
+			return nil
+		}
+		defer resp.Body.Close()
+
+		return SyncResponse(true, nil)
+	}
+
+	post := api.InstanceExecPost{}
+	buf, err := ioutil.ReadAll(r.Body)
+	if err != nil {
+		return BadRequest(err)
+	}
+
+	if err := json.Unmarshal(buf, &post); err != nil {
+		return BadRequest(err)
 	}
 
 	env := map[string]string{}
