@@ -323,7 +323,12 @@ func (vm *vmQemu) Shutdown(timeout time.Duration) error {
 
 func (vm *vmQemu) Start(stateful bool) error {
 	// Create any missing directories.
-	err := os.MkdirAll(vm.LogPath(), 0700)
+	err := os.MkdirAll(vm.Path(), 0100)
+	if err != nil {
+		return err
+	}
+
+	err = os.MkdirAll(vm.LogPath(), 0700)
 	if err != nil {
 		return err
 	}
@@ -380,7 +385,6 @@ func (vm *vmQemu) Start(stateful bool) error {
 		}
 
 		if len(runConf.NetworkInterface) > 0 {
-			logger.Errorf("tomp %+v", runConf.NetworkInterface)
 			for _, nicItem := range runConf.NetworkInterface {
 				if nicItem.Key == "link" {
 					tapDev["tap"] = nicItem.Value
@@ -1039,7 +1043,60 @@ func (vm *vmQemu) FileRemove(path string) error {
 }
 
 func (vm *vmQemu) Console(terminal *os.File) *exec.Cmd {
-	return nil
+	// Connect to the monitor.
+	monitor, err := qmp.NewSocketMonitor("unix", vm.getMonitorPath(), 2*time.Second)
+	if err != nil {
+		return nil // The VM isn't running as no monitor socket available.
+	}
+
+	err = monitor.Connect()
+	if err != nil {
+		return nil // The capabilities handshake failed.
+	}
+	defer monitor.Disconnect()
+
+	// Send the status command.
+	respRaw, err := monitor.Run([]byte("{'execute': 'query-chardev'}"))
+	if err != nil {
+		return nil // Status command failed.
+	}
+
+	var respDecoded struct {
+		Return []struct {
+			Label    string `json:"label"`
+			Filename string `json:"filename"`
+		} `json:"return"`
+	}
+
+	err = json.Unmarshal(respRaw, &respDecoded)
+	if err != nil {
+		return nil // JSON decode failed.
+	}
+
+	var ptsPath string
+
+	for _, v := range respDecoded.Return {
+		if v.Label == "console" {
+			ptsPath = strings.TrimPrefix(v.Filename, "pty:")
+		}
+	}
+
+	if ptsPath == "" {
+		return nil
+	}
+
+	args := []string{
+		"screen",
+		ptsPath,
+	}
+
+	cmd := exec.Cmd{}
+	cmd.Path = "/usr/bin/screen" // TODO dont rely on screen.
+	cmd.Args = args
+	cmd.Stdin = terminal
+	cmd.Stdout = terminal
+	cmd.Stderr = terminal
+	return &cmd
 }
 
 func (vm *vmQemu) Exec(command []string, env map[string]string, stdin *os.File, stdout *os.File, stderr *os.File, wait bool, cwd string, uid uint32, gid uint32) (*exec.Cmd, int, int, error) {
