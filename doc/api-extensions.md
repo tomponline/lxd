@@ -1699,3 +1699,6 @@ This introduces a new `bgp.peers.<name>.holdtime` configuration key to control t
 
 ## `storage_volumes_all_projects`
 This introduces the ability to list storage volumes from all projects.
+
+## `storage_buckets`
+This introduces the storage bucket API. It allows the management of S3 object storage buckets for storage pools.
