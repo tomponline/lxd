@@ -106,6 +106,25 @@ var updates = map[int]schema.Update{
 	67: updateFromV66,
 	68: updateFromV67,
 	69: updateFromV68,
+	70: updateFromV69,
+}
+
+// updateFromV69 adds the locks table.
+func updateFromV69(ctx context.Context, tx *sql.Tx) error {
+	_, err := tx.Exec(`
+CREATE TABLE locks (
+	id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+	name TEXT NOT NULL,
+	node_id INTEGER NOT NULL,
+	UNIQUE (name),
+	FOREIGN KEY (node_id) REFERENCES nodes (id) ON DELETE CASCADE
+);
+`)
+	if err != nil {
+		return fmt.Errorf("Failed adding locks table: %w", err)
+	}
+
+	return nil
 }
 
 // updateFromV68 fixes unique index for record name to make it zone specific.
@@ -252,7 +271,7 @@ func updateFromV65(ctx context.Context, tx *sql.Tx) error {
 	return nil
 }
 
-// updatefromV64 updates nodes_cluster_groups to include an ID field so that it works well with lxd-generate.
+// updateFromV64 updates nodes_cluster_groups to include an ID field so that it works well with lxd-generate.
 func updateFromV64(ctx context.Context, tx *sql.Tx) error {
 	_, err := tx.Exec(`
 CREATE TABLE "nodes_cluster_groups_new" (

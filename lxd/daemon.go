@@ -65,6 +65,7 @@ import (
 	"github.com/lxc/lxd/lxd/util"
 	"github.com/lxc/lxd/lxd/warnings"
 	"github.com/lxc/lxd/shared"
+	"github.com/lxc/lxd/shared/api"
 	"github.com/lxc/lxd/shared/cancel"
 	"github.com/lxc/lxd/shared/idmap"
 	"github.com/lxc/lxd/shared/logger"
@@ -766,8 +767,17 @@ func (d *Daemon) init() error {
 	// Setup logger
 	events.LoggingServer = d.events
 
-	// Setup internal event listener
-	d.internalListener = events.NewInternalListener(d.shutdownCtx, d.events)
+	// Setup internal event listener for local lifecyle and logging events.
+	d.internalListener = events.NewInternalListener(d.shutdownCtx, d.events, []string{api.EventTypeLifecycle, api.EventTypeLogging}, []events.EventSource{events.EventSourcePull, events.EventSourcePush})
+
+	foo := events.NewInternalListener(d.shutdownCtx, d.events, []string{api.EventTypeLifecycle}, nil)
+	foo.AddHandler("tomp", func(event api.Event) {
+		if event.Type != "lifecycle" {
+			return
+		}
+
+		os.Stderr.WriteString(fmt.Sprintf("tomp %+v\n", event))
+	})
 
 	// Lets check if there's an existing LXD running
 	err := endpoints.CheckAlreadyRunning(d.UnixSocket())
