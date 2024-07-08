@@ -7,7 +7,6 @@ require (
 	github.com/armon/go-proxyproto v0.1.0
 	github.com/canonical/go-dqlite v1.21.0
 	github.com/checkpoint-restore/go-criu/v6 v6.3.0
-	github.com/checkpoint-restore/go-criu/v7 v7.1.0
 	github.com/dell/goscaleio v1.14.1
 	github.com/digitalocean/go-qemu v0.0.0-20230711162256-2e3d0186973e
 	github.com/digitalocean/go-smbios v0.0.0-20180907143718-390a4f403a8e
@@ -27,7 +26,6 @@ require (
 	github.com/jaypipes/pcidb v1.0.1
 	github.com/jochenvg/go-udev v0.0.0-20171110120927-d6b62d56d37b
 	github.com/juju/gomaasapi v0.0.0-20200602032615-aa561369c767
-	github.com/juju/gomaasapi/v2 v2.3.0
 	github.com/kballard/go-shellquote v0.0.0-20180428030007-95032a82bc51
 	github.com/lxc/go-lxc v0.0.0-20240606200241-27b3d116511f
 	github.com/mattn/go-colorable v0.1.13
@@ -55,12 +53,12 @@ require (
 	github.com/zitadel/oidc/v3 v3.25.1
 	go.starlark.net v0.0.0-20240520160348-046347dcd104
 	go.uber.org/zap v1.27.0
-	golang.org/x/crypto v0.24.0
+	golang.org/x/crypto v0.25.0
 	golang.org/x/exp v0.0.0-20240613232115-7f521ea00fb8
 	golang.org/x/oauth2 v0.21.0
 	golang.org/x/sync v0.7.0
-	golang.org/x/sys v0.21.0
-	golang.org/x/term v0.21.0
+	golang.org/x/sys v0.22.0
+	golang.org/x/term v0.22.0
 	golang.org/x/text v0.16.0
 	google.golang.org/protobuf v1.34.2
 	gopkg.in/tomb.v2 v2.0.0-20161208151619-d5d1b5820637
