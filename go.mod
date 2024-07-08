@@ -7,7 +7,6 @@ require (
 	github.com/armon/go-proxyproto v0.1.0
 	github.com/canonical/go-dqlite v1.21.0
 	github.com/checkpoint-restore/go-criu/v6 v6.3.0
-	github.com/checkpoint-restore/go-criu/v7 v7.1.0
 	github.com/dell/goscaleio v1.14.1
 	github.com/digitalocean/go-qemu v0.0.0-20230711162256-2e3d0186973e
 	github.com/digitalocean/go-smbios v0.0.0-20180907143718-390a4f403a8e
@@ -27,7 +26,6 @@ require (
 	github.com/jaypipes/pcidb v1.0.1
 	github.com/jochenvg/go-udev v0.0.0-20171110120927-d6b62d56d37b
 	github.com/juju/gomaasapi v0.0.0-20200602032615-aa561369c767
-	github.com/juju/gomaasapi/v2 v2.3.0
 	github.com/kballard/go-shellquote v0.0.0-20180428030007-95032a82bc51
 	github.com/lxc/go-lxc v0.0.0-20240606200241-27b3d116511f
 	github.com/mattn/go-colorable v0.1.13
@@ -36,7 +34,7 @@ require (
 	github.com/mdlayher/netx v0.0.0-20230430222610-7e21880baee8
 	github.com/mdlayher/vsock v1.2.1
 	github.com/miekg/dns v1.1.61
-	github.com/minio/minio-go/v7 v7.0.72
+	github.com/minio/minio-go/v7 v7.0.73
 	github.com/mitchellh/mapstructure v1.5.0
 	github.com/oklog/ulid/v2 v2.1.0
 	github.com/olekukonko/tablewriter v0.0.5
@@ -83,6 +81,7 @@ require (
 	github.com/eapache/queue v1.1.0 // indirect
 	github.com/envoyproxy/protoc-gen-validate v1.0.4 // indirect
 	github.com/fsnotify/fsnotify v1.7.0 // indirect
+	github.com/go-ini/ini v1.67.0 // indirect
 	github.com/go-logr/logr v1.4.2 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/goccy/go-json v0.10.3 // indirect
