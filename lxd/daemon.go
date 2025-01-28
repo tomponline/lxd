@@ -71,6 +71,7 @@ import (
 	"github.com/canonical/lxd/lxd/storage/s3/miniod"
 	"github.com/canonical/lxd/lxd/sys"
 	"github.com/canonical/lxd/lxd/task"
+	"github.com/canonical/lxd/lxd/temporal"
 	"github.com/canonical/lxd/lxd/ubuntupro"
 	"github.com/canonical/lxd/lxd/ucred"
 	"github.com/canonical/lxd/lxd/util"
@@ -2091,6 +2092,9 @@ func (d *Daemon) init() error {
 	d.waitReady.Cancel()
 
 	logger.Info("Daemon started")
+
+	//now cluster db is ready. we can go
+	temporal.Init(d.State, d.shutdownCtx, d.db)
 
 	return nil
 }

@@ -30,10 +30,10 @@ import (
 //
 // The dialer argument is a function that returns a gRPC dialer that can be
 // used to connect to a database node using the gRPC SQL package.
-func Open(name string, store driver.NodeStore, options ...driver.Option) (*sql.DB, error) {
+func Open(name string, store driver.NodeStore, options ...driver.Option) (*sql.DB, string, error) {
 	driver, err := driver.New(store, options...)
 	if err != nil {
-		return nil, fmt.Errorf("Failed to create dqlite driver: %w", err)
+		return nil, "", fmt.Errorf("Failed to create dqlite driver: %w", err)
 	}
 
 	driverName := dqliteDriverName()
@@ -48,10 +48,10 @@ func Open(name string, store driver.NodeStore, options ...driver.Option) (*sql.D
 
 	db, err := sql.Open(driverName, name)
 	if err != nil {
-		return nil, fmt.Errorf("cannot open cluster database: %w", err)
+		return nil, "", fmt.Errorf("cannot open cluster database: %w", err)
 	}
 
-	return db, nil
+	return db, driverName, nil
 }
 
 // EnsureSchema applies all relevant schema updates to the cluster database.

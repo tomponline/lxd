@@ -122,6 +122,7 @@ func (n *Node) Close() error {
 
 // Cluster mediates access to LXD's data stored in the cluster dqlite database.
 type Cluster struct {
+	DriverName string
 	db         *sql.DB // Handle to the cluster dqlite database, gated behind gRPC SQL.
 	nodeID     int64   // Node ID of this LXD instance.
 	mu         sync.RWMutex
@@ -144,7 +145,7 @@ type Cluster struct {
 // behind, an Upgrading error is returned.
 // Accepts a closingCtx context argument used to indicate when the daemon is shutting down.
 func OpenCluster(closingCtx context.Context, name string, store driver.NodeStore, address, dir string, timeout time.Duration, dump *Dump, serverUUID string, options ...driver.Option) (*Cluster, error) {
-	db, err := cluster.Open(name, store, options...)
+	db, driverName, err := cluster.Open(name, store, options...)
 	if err != nil {
 		return nil, fmt.Errorf("Failed to open database: %w", err)
 	}
@@ -249,6 +250,7 @@ func OpenCluster(closingCtx context.Context, name string, store driver.NodeStore
 	cluster.PreparedStmts = stmts
 
 	clusterDB := &Cluster{
+		DriverName: driverName,
 		db:         db,
 		closingCtx: closingCtx,
 	}
