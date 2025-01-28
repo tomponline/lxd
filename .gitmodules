@@ -1,0 +1,4 @@
+[submodule "temporal"]
+	path = temporal
+	url = git@github.com:canonical/lxd-temporal-dqlite-poc.git
+	branch = for-lxd
