@@ -24,6 +24,7 @@ func workermain(ctx context.Context, wg *sync.WaitGroup, identity string, HostPo
 	c, err := client.Dial(client.Options{
 		Identity: identity,
 		HostPort: HostPort,
+		Logger:   NewTemporalLogger(),
 	})
 	if err != nil {
 		log.Fatalf("worker failed to connect to server: %s", err)
