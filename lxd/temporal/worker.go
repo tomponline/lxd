@@ -35,6 +35,9 @@ func workermain(ctx context.Context, wg *sync.WaitGroup, identity string, HostPo
 	w.RegisterWorkflow(GreetingWorkflow)
 	w.RegisterActivity(ComposeGreeting)
 
+	w.RegisterWorkflow(GetInstanceStateWorkflow)
+	w.RegisterActivity(GetInstanceStateActivity)
+
 	if err := w.Start(); err != nil {
 		log.Fatalf("failed to start worker: %s", err)
 	}
