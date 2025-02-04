@@ -9,8 +9,10 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/canonical/go-dqlite/v3/driver"
+	"github.com/qustavo/sqlhooks/v2"
 
 	"github.com/canonical/lxd/lxd/auth"
 	"github.com/canonical/lxd/lxd/db/query"
@@ -22,6 +24,29 @@ import (
 	"github.com/canonical/lxd/shared/osarch"
 	"github.com/canonical/lxd/shared/version"
 )
+
+// Hooks satisfies the sqlhook.Hooks interface
+type Hooks struct {
+	name    string
+	time    time.Duration
+	counter int
+}
+
+// Before hook will print the query with it's args and return the context with the timestamp
+func (h *Hooks) Before(ctx context.Context, query string, args ...interface{}) (context.Context, error) {
+	fmt.Printf("(%s;%d;%s)> %s %q", h.name, h.counter, h.time, query, args)
+	h.counter++
+	return context.WithValue(ctx, "query_begin", time.Now()), nil
+}
+
+// After hook will get the timestamp registered on the Before hook and print the elapsed time
+func (h *Hooks) After(ctx context.Context, query string, args ...interface{}) (context.Context, error) {
+	begin := ctx.Value("query_begin").(time.Time)
+	queryTime := time.Since(begin)
+	h.time += queryTime
+	fmt.Printf(". took: %s\n", queryTime)
+	return ctx, nil
+}
 
 // Open the cluster database object.
 //
@@ -36,8 +61,10 @@ func Open(name string, store driver.NodeStore, options ...driver.Option) (*sql.D
 		return nil, "", fmt.Errorf("Failed to create dqlite driver: %w", err)
 	}
 
-	driverName := dqliteDriverName()
-	sql.Register(driverName, driver)
+	driverNameForTemporal := dqliteDriverName()
+	driverNameForLXD := dqliteDriverName()
+	sql.Register(driverNameForTemporal, sqlhooks.Wrap(driver, &Hooks{name: "temporal"}))
+	sql.Register(driverNameForLXD, sqlhooks.Wrap(driver, &Hooks{name: "LXD"}))
 
 	// Create the cluster db. This won't immediately establish any network
 	// connection, that will happen only when a db transaction is started
@@ -46,12 +73,12 @@ func Open(name string, store driver.NodeStore, options ...driver.Option) (*sql.D
 		name = "db.bin"
 	}
 
-	db, err := sql.Open(driverName, name)
+	db, err := sql.Open(driverNameForLXD, name)
 	if err != nil {
 		return nil, "", fmt.Errorf("cannot open cluster database: %w", err)
 	}
 
-	return db, driverName, nil
+	return db, driverNameForTemporal, nil
 }
 
 // EnsureSchema applies all relevant schema updates to the cluster database.
