@@ -17,6 +17,7 @@ import (
 	"github.com/canonical/lxd/lxd/auth"
 	"github.com/canonical/lxd/lxd/db/query"
 	"github.com/canonical/lxd/lxd/db/schema"
+	"github.com/canonical/lxd/lxd/metrics"
 	"github.com/canonical/lxd/lxd/util"
 	"github.com/canonical/lxd/shared"
 	"github.com/canonical/lxd/shared/api"
@@ -34,6 +35,7 @@ type Hooks struct {
 
 // Before hook will print the query with it's args and return the context with the timestamp
 func (h *Hooks) Before(ctx context.Context, query string, args ...interface{}) (context.Context, error) {
+	metrics.AddSQLMetric(h.name, h.time, h.counter)
 	fmt.Printf("(%s;%d;%s)> %s %q", h.name, h.counter, h.time, query, args)
 	h.counter++
 	return context.WithValue(ctx, "query_begin", time.Now()), nil

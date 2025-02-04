@@ -150,6 +150,14 @@ const (
 	UptimeSeconds
 	// WarningsTotal represents the number of active warnings.
 	WarningsTotal
+	// TemporalQueriesCount
+	TemporalQueriesCount
+	// TemporalQueriesDuration
+	TemporalQueriesDuration
+	// LXDQueriesCount
+	LXDQueriesCount
+	// LXDQueriesDuration
+	LXDQueriesDuration
 )
 
 // MetricNames associates a metric type to its name.
@@ -221,6 +229,10 @@ var MetricNames = map[MetricType]string{
 	UptimeSeconds:               "lxd_uptime_seconds",
 	WarningsTotal:               "lxd_warnings_total",
 	Instances:                   "lxd_instances",
+	TemporalQueriesCount:        "lxd_temporal_queries_count",
+	TemporalQueriesDuration:     "lxd_temporal_queries_duration",
+	LXDQueriesCount:             "lxd_queries_count",
+	LXDQueriesDuration:          "lxd_queries_duration",
 }
 
 // MetricHeaders represents the metric headers which contain help messages as specified by OpenMetrics.
@@ -292,4 +304,8 @@ var MetricHeaders = map[MetricType]string{
 	UptimeSeconds:               "# HELP lxd_uptime_seconds The daemon uptime in seconds.",
 	WarningsTotal:               "# HELP lxd_warnings_total The number of active warnings.",
 	Instances:                   "# HELP lxd_instances The number of instances.",
+	TemporalQueriesCount:        "# HELP lxd_temporal_queries_count",
+	TemporalQueriesDuration:     "# HELP lxd_temporal_queries_duration",
+	LXDQueriesCount:             "# HELP lxd_queries_count",
+	LXDQueriesDuration:          "# HELP lxd_queries_duration",
 }

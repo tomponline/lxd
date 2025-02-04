@@ -5,7 +5,37 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 )
+
+type SQLMetrics struct {
+	time    time.Duration
+	counter int
+}
+
+var (
+	sqlMetrics      = make(map[string]SQLMetrics)
+	sqlMetricsMutex = sync.RWMutex{}
+)
+
+func AddSQLMetric(name string, time time.Duration, counter int) {
+	sqlMetricsMutex.Lock()
+	sqlMetrics[name] = SQLMetrics{time: time, counter: counter}
+	sqlMetricsMutex.Unlock()
+}
+
+func GetSQLMetrics(name string) (time.Duration, int) {
+	sqlMetricsMutex.RLock()
+	metrics, ok := sqlMetrics[name]
+	if !ok {
+		sqlMetricsMutex.RUnlock()
+		AddSQLMetric(name, 0, 0)
+		return 0, 0
+	}
+	sqlMetricsMutex.RUnlock()
+	return metrics.time, metrics.counter
+}
 
 // NewMetricSet returns a new MetricSet.
 func NewMetricSet(labels map[string]string) *MetricSet {

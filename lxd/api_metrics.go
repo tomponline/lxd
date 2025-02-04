@@ -485,5 +485,12 @@ func internalMetrics(ctx context.Context, s *state.State, tx *db.ClusterTx) *met
 	out.AddSamples(metrics.GoStackSysBytes, metrics.Sample{Value: float64(ms.StackSys)})
 	out.AddSamples(metrics.GoSysBytes, metrics.Sample{Value: float64(ms.Sys)})
 
+	d, c := metrics.GetSQLMetrics("temporal")
+	out.AddSamples(metrics.TemporalQueriesCount, metrics.Sample{Value: float64(c)})
+	out.AddSamples(metrics.TemporalQueriesDuration, metrics.Sample{Value: float64(d.Seconds())})
+	d, c = metrics.GetSQLMetrics("LXD")
+	out.AddSamples(metrics.LXDQueriesCount, metrics.Sample{Value: float64(c)})
+	out.AddSamples(metrics.LXDQueriesDuration, metrics.Sample{Value: float64(d.Seconds())})
+
 	return out
 }
