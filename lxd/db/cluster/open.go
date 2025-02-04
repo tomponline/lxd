@@ -36,7 +36,7 @@ type Hooks struct {
 // Before hook will print the query with it's args and return the context with the timestamp
 func (h *Hooks) Before(ctx context.Context, query string, args ...interface{}) (context.Context, error) {
 	metrics.AddSQLMetric(h.name, h.time, h.counter)
-	fmt.Printf("(%s;%d;%s)> %s %q", h.name, h.counter, h.time, query, args)
+	//fmt.Printf("(%s;%d;%s)> %s %q", h.name, h.counter, h.time, query, args)
 	h.counter++
 	return context.WithValue(ctx, "query_begin", time.Now()), nil
 }
@@ -46,7 +46,7 @@ func (h *Hooks) After(ctx context.Context, query string, args ...interface{}) (c
 	begin := ctx.Value("query_begin").(time.Time)
 	queryTime := time.Since(begin)
 	h.time += queryTime
-	fmt.Printf(". took: %s\n", queryTime)
+	//fmt.Printf(". took: %s\n", queryTime)
 	return ctx, nil
 }
 
