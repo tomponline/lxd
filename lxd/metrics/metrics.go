@@ -12,28 +12,39 @@ import (
 type SQLMetrics struct {
 	time    time.Duration
 	counter int
+	l       sync.Locker
 }
 
 var (
-	sqlMetrics      = make(map[string]SQLMetrics)
+	sqlMetrics      = make(map[string]*SQLMetrics)
 	sqlMetricsMutex = sync.RWMutex{}
 )
 
-func AddSQLMetric(name string, time time.Duration, counter int) {
-	sqlMetricsMutex.Lock()
-	sqlMetrics[name] = SQLMetrics{time: time, counter: counter}
-	sqlMetricsMutex.Unlock()
-}
-
-func GetSQLMetrics(name string) (time.Duration, int) {
+func GetOrInitSQLMetric(name string) *SQLMetrics {
 	sqlMetricsMutex.RLock()
 	metrics, ok := sqlMetrics[name]
 	if !ok {
 		sqlMetricsMutex.RUnlock()
-		AddSQLMetric(name, 0, 0)
-		return 0, 0
+		metrics := &SQLMetrics{l: &sync.Mutex{}}
+		sqlMetricsMutex.Lock()
+		sqlMetrics[name] = metrics
+		sqlMetricsMutex.Unlock()
+		return metrics
 	}
 	sqlMetricsMutex.RUnlock()
+	return metrics
+
+}
+
+func (m *SQLMetrics) Add(time time.Duration) {
+	m.l.Lock()
+	m.counter++
+	m.time += time
+	m.l.Unlock()
+}
+
+func GetSQLMetrics(name string) (time.Duration, int) {
+	metrics := GetOrInitSQLMetric(name)
 	return metrics.time, metrics.counter
 }
 
