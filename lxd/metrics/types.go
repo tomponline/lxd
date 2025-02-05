@@ -225,8 +225,8 @@ var MetricNames = map[MetricType]string{
 	UptimeSeconds:               "lxd_uptime_seconds",
 	WarningsTotal:               "lxd_warnings_total",
 	Instances:                   "lxd_instances",
-	QueriesCount:                "lxd_queries_count",
-	QueriesDuration:             "lxd_queries_duration",
+	QueriesCount:                "lxd_queries_total",
+	QueriesDuration:             "lxd_queries_duration_seconds",
 }
 
 // MetricHeaders represents the metric headers which contain help messages as specified by OpenMetrics.
@@ -298,6 +298,6 @@ var MetricHeaders = map[MetricType]string{
 	UptimeSeconds:               "# HELP lxd_uptime_seconds The daemon uptime in seconds.",
 	WarningsTotal:               "# HELP lxd_warnings_total The number of active warnings.",
 	Instances:                   "# HELP lxd_instances The number of instances.",
-	QueriesCount:                "# HELP lxd_queries_count",
-	QueriesDuration:             "# HELP lxd_queries_duration",
+	QueriesCount:                "# HELP lxd_queries_total",
+	QueriesDuration:             "# HELP lxd_queries_duration_seconds",
 }
