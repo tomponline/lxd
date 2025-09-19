@@ -33,7 +33,7 @@ func GreetingWorkflow(ctx workflow.Context, name string) (string, error) {
 }
 
 func GetInstanceStateActivity(ctx context.Context, projectName string, name string) (api.InstanceState, error) {
-	c, err := instance.LoadByProjectAndName(daemonState, projectName, name)
+	c, err := instance.LoadByProjectAndName(daemonState(), projectName, name)
 	if err != nil {
 		return api.InstanceState{}, err
 	}
