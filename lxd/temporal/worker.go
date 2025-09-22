@@ -2,34 +2,25 @@ package temporal
 
 import (
 	"context"
-	"log"
-	"sync"
-
-	"go.temporal.io/sdk/client"
-
-	"go.temporal.io/sdk/worker"
+	"fmt"
 
 	_ "github.com/mattn/go-sqlite3"
+	"go.temporal.io/sdk/worker"
+
+	"github.com/canonical/lxd/shared/logger"
 )
 
 const (
 	LXDTaskQueue = "LXD_TASK_QUEUE"
 )
 
-func workermain(ctx context.Context, wg *sync.WaitGroup, identity string, HostPort string) {
-	defer wg.Done()
+func workermain(ctx context.Context) error {
+	logger.Warn("Starting Temporal worker")
 
-	temporalServerReady.Wait()
-
-	c, err := client.Dial(client.Options{
-		Identity: identity,
-		HostPort: HostPort,
-		Logger:   NewTemporalLogger(),
-	})
+	c, err := GetClient()
 	if err != nil {
-		log.Fatalf("worker failed to connect to server: %s", err)
+		return fmt.Errorf("Client failed to get a temporal client: %w", err)
 	}
-	defer c.Close()
 
 	w := worker.New(c, LXDTaskQueue, worker.Options{})
 	w.RegisterWorkflow(GreetingWorkflow)
@@ -39,11 +30,15 @@ func workermain(ctx context.Context, wg *sync.WaitGroup, identity string, HostPo
 	w.RegisterActivity(GetInstanceStateActivity)
 
 	if err := w.Start(); err != nil {
-		log.Fatalf("failed to start worker: %s", err)
+		return fmt.Errorf("Failed to start worker: %w", err)
 	}
 	defer w.Stop()
 
+	logger.Warn("Temporal worker started")
+
 	// Wait for a signal to exit
 	<-ctx.Done()
-	log.Printf("Stopping Temporal worker as context was canceled...")
+	logger.Warn("Stopping Temporal worker as context was canceled...")
+
+	return nil
 }

@@ -1,39 +1,34 @@
 package temporal
 
 import (
-	"log"
-	"os"
+	"github.com/canonical/lxd/shared/logger"
 )
 
 type TemporalLogger struct {
-	logger *log.Logger
+	logger logger.Logger
 }
 
 // NewTemporalLogger creates new instance of TemporalLogger.
-func NewTemporalLogger() *TemporalLogger {
-	return &TemporalLogger{logger: log.New(os.Stdout, "", log.LstdFlags)}
-}
-
-func (l *TemporalLogger) println(level, msg string, keyvals []interface{}) {
-	l.logger.Println(append([]interface{}{level, msg}, keyvals...)...)
+func NewTemporalLogger(l logger.Logger) *TemporalLogger {
+	return &TemporalLogger{logger: l}
 }
 
 // Debug writes message to the log.
 func (l *TemporalLogger) Debug(msg string, keyvals ...interface{}) {
-	//l.println("DEBUG", msg, keyvals)
+	l.logger.Debug("Temporal: "+msg, logger.Ctx{"keyvals": keyvals})
 }
 
 // Info writes message to the log.
 func (l *TemporalLogger) Info(msg string, keyvals ...interface{}) {
-	l.println("INFO ", msg, keyvals)
+	l.logger.Info("Temporal: "+msg, logger.Ctx{"keyvals": keyvals})
 }
 
 // Warn writes message to the log.
 func (l *TemporalLogger) Warn(msg string, keyvals ...interface{}) {
-	l.println("WARN ", msg, keyvals)
+	l.logger.Warn("Temporal: "+msg, logger.Ctx{"keyvals": keyvals})
 }
 
 // Error writes message to the log.
 func (l *TemporalLogger) Error(msg string, keyvals ...interface{}) {
-	l.println("ERROR", msg, keyvals)
+	l.logger.Error("Temporal: "+msg, logger.Ctx{"keyvals": keyvals})
 }

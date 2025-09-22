@@ -3,50 +3,27 @@ package temporal
 import (
 	"context"
 	"fmt"
-	"log"
-	"sync"
 
 	"go.temporal.io/sdk/client"
 
+	"github.com/canonical/lxd/shared/logger"
 	_ "github.com/mattn/go-sqlite3"
 )
 
-var clientPtr *client.Client
-
-func clientmain(ctx context.Context, wg *sync.WaitGroup, identity string, HostPort string) {
-	defer wg.Done()
-
-	temporalServerReady.Wait()
-
-	c, err := client.Dial(client.Options{
-		Identity: identity,
-		HostPort: HostPort,
-		Logger:   NewTemporalLogger(),
-	})
-	if err != nil {
-		log.Fatalf("client failed to connect to server: %s", err)
-	}
-	defer c.Close()
-
-	clientPtr = &c
-	executeHelloWorldWorkflow(identity)
-
-	// Wait for a signal to exit
-	<-ctx.Done()
-}
+var clientPtr client.Client
 
 func GetClient() (client.Client, error) {
 	if clientPtr == nil {
 		return nil, fmt.Errorf("Temporal client wasn't initialized")
 	}
 
-	return *clientPtr, nil
+	return clientPtr, nil
 }
 
-func executeHelloWorldWorkflow(identity string) {
+func executeHelloWorldWorkflow(ctx context.Context, identity string) error {
 	c, err := GetClient()
 	if err != nil {
-		log.Fatalf("client failed to get a temporal client: %s", err)
+		return fmt.Errorf("Client failed to get a temporal client: %w", err)
 	}
 
 	name := fmt.Sprintf("World (from LXD %s)", identity)
@@ -55,14 +32,15 @@ func executeHelloWorldWorkflow(identity string) {
 		TaskQueue: LXDTaskQueue,
 	}, GreetingWorkflow, name)
 	if err != nil {
-		log.Fatalf("workflow failed to complete: %s", err)
+		return err
 	}
 
 	var result string
-	err = run.Get(context.Background(), &result)
+	err = run.Get(ctx, &result)
 	if err != nil {
-		log.Fatalln("failed to get workflow result", err)
+		return err
 	}
 
-	log.Printf("WorkflowID: %s RunID: %s Result: %s", run.GetID(), run.GetRunID(), result)
+	logger.Warn("Temporal Workflow executed", logger.Ctx{"ID": run.GetID(), "RunID": run.GetRunID(), "result": result})
+	return nil
 }

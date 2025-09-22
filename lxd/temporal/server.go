@@ -3,9 +3,8 @@ package temporal
 import (
 	"context"
 	"fmt"
-	"log"
 	"net/http"
-	"sync"
+	"strconv"
 	"time"
 
 	uiserver "github.com/temporalio/ui-server/v2/server"
@@ -22,13 +21,12 @@ import (
 	dqliteschema "go.temporal.io/server/schema/sqlite"
 	"go.temporal.io/server/temporal"
 
-	"github.com/canonical/lxd/lxd/db"
+	"github.com/canonical/lxd/shared/logger"
+
 	_ "github.com/mattn/go-sqlite3"
 )
 
-func servermain(ctx context.Context, wg *sync.WaitGroup, db *db.DB, ip string, port int, clusterID string, nodeId int) {
-	defer wg.Done()
-
+func servermain(ctx context.Context, ip string, port int, clusterID string) error {
 	metricsPath := "/metrics"
 	namespace := "default"
 	clusterName := "active"
@@ -38,27 +36,46 @@ func servermain(ctx context.Context, wg *sync.WaitGroup, db *db.DB, ip string, p
 	workerPort := port + 5
 	uiPort := port + 1000
 	metricsPort := uiPort + 1000
-	//dqlitePort := port + 4
 
-	ui := uiserver.NewServer(uiserveroptions.WithConfigProvider(&uiconfig.Config{
-		TemporalGRPCAddress: fmt.Sprintf("%s:%d", ip, port),
-		Host:                ip,
-		Port:                uiPort,
-		EnableUI:            true,
-		CORS:                uiconfig.CORS{CookieInsecure: true},
-		HideLogs:            true,
-	}))
-	go func() {
-		if err := ui.Start(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("UI server error: %s", err)
-		}
-	}()
+	nsConfig, err := dqliteschema.NewNamespaceConfig(clusterName, namespace, false, map[string]enums.IndexedValueType{})
+	if err != nil {
+		return fmt.Errorf("Unable to create namespace config: %w", err)
+	}
+
+	const dqliteNamespace = "dqlite-default"
+	ds := map[string]config.DataStore{
+		dqliteNamespace: {
+			SQL: &config.SQL{
+				//Connect: func(sqlConfig *config.SQL) (*sqlx.DB, error) {
+				//	db := sqlx.NewDb(db.Cluster.DB(), SQLDriverName)
+				//
+				// Maps struct names in CamelCase to snake without need for db struct tags.
+				//	db.MapperFunc(strcase.ToSnake)
+				//
+				//	return db, nil
+				//},
+				PluginName: dqliteplugin.PluginName,
+				ConnectAttributes: map[string]string{
+					//"mode":           "memory",
+					"goSqlDriverName": SQLDriverName,
+					"setup":           "true",
+				},
+				DatabaseName: SQLDbName,
+			},
+		},
+	}
+
+	if err := dqliteschema.CreateNamespaces(ds[dqliteNamespace].SQL, nsConfig); err != nil {
+		return fmt.Errorf("Unable to create namespace: %w", err)
+	}
+
+	logger.Warn("Temporal create namespaces")
 
 	conf := &config.Config{
 		Global: config.Global{
 			Membership: config.Membership{
 				MaxJoinDuration:  30 * time.Second,
-				BroadcastAddress: "127.0.0.1",
+				BroadcastAddress: ip, // IP that is advertised
 			},
 			Metrics: &metrics.Config{
 				Prometheus: &metrics.PrometheusConfig{
@@ -68,30 +85,10 @@ func servermain(ctx context.Context, wg *sync.WaitGroup, db *db.DB, ip string, p
 			},
 		},
 		Persistence: config.Persistence{
-			DefaultStore:     "dqlite-default",
-			VisibilityStore:  "dqlite-default",
+			DefaultStore:     dqliteNamespace,
+			VisibilityStore:  dqliteNamespace,
 			NumHistoryShards: 1,
-			DataStores: map[string]config.DataStore{
-				"dqlite-default": {
-					SQL: &config.SQL{
-						//Connect: func(sqlConfig *config.SQL) (*sqlx.DB, error) {
-						//	db := sqlx.NewDb(db.Cluster.DB(), SQLDriverName)
-						//
-						// Maps struct names in CamelCase to snake without need for db struct tags.
-						//	db.MapperFunc(strcase.ToSnake)
-						//
-						//	return db, nil
-						//},
-						PluginName: dqliteplugin.PluginName,
-						ConnectAttributes: map[string]string{
-							//"mode":           "memory",
-							"goSqlDriverName": SQLDriverName,
-							"setup":           "true",
-						},
-						DatabaseName: SQLDbName,
-					},
-				},
-			},
+			DataStores:       ds,
 		},
 		ClusterMetadata: &cluster.Config{
 			EnableGlobalNamespace:    false,
@@ -163,25 +160,17 @@ func servermain(ctx context.Context, wg *sync.WaitGroup, db *db.DB, ip string, p
 		},
 	}
 
-	nsConfig, err := dqliteschema.NewNamespaceConfig(clusterName, namespace, false, map[string]enums.IndexedValueType{})
-	if err != nil {
-		log.Fatalf("unable to create namespace config: %s", err)
-	}
-
-	if err := dqliteschema.CreateNamespaces(conf.Persistence.DataStores["dqlite-default"].SQL, nsConfig); err != nil {
-		log.Fatalf("unable to create namespace: %s", err)
-	}
 	authorizer, err := authorization.GetAuthorizerFromConfig(&conf.Global.Authorization)
 	if err != nil {
-		log.Fatalf("unable to create authorizer: %s", err)
+		return fmt.Errorf("Unable to create authorizer: %w", err)
 	}
 
-	logger := temporallog.NewNoopLogger().With()
-	//logger := temporallog.NewCLILogger().With()
+	//tlogger := temporallog.NewNoopLogger().With()
+	tlogger := temporallog.NewCLILogger().With()
 
-	claimMapper, err := authorization.GetClaimMapperFromConfig(&conf.Global.Authorization, logger)
+	claimMapper, err := authorization.GetClaimMapperFromConfig(&conf.Global.Authorization, tlogger)
 	if err != nil {
-		log.Fatalf("unable to create claim mapper: %s", err)
+		return fmt.Errorf("Unable to create claim mapper: %w", err)
 	}
 
 	dynConf := make(dynamicconfig.StaticClient)
@@ -197,27 +186,44 @@ func servermain(ctx context.Context, wg *sync.WaitGroup, db *db.DB, ip string, p
 		//		primitives.MatchingService: static.SingleLocalHost(fmt.Sprintf("%s:%d", ip, matchingPort)),
 		//		primitives.WorkerService:   static.SingleLocalHost(fmt.Sprintf("%s:%d", ip, workerPort)),
 		//	}),
-		temporal.WithLogger(logger),
+		temporal.WithLogger(tlogger),
 		temporal.WithAuthorizer(authorizer),
 		temporal.WithClaimMapper(func(*config.Config) authorization.ClaimMapper { return claimMapper }),
 		temporal.WithDynamicConfigClient(dynConf))
 	if err != nil {
-		log.Fatalf("unable to start server: %s", err)
+		return fmt.Errorf("Unable to start server: %w", err)
 	}
 
 	if err := server.Start(); err != nil {
-		log.Fatalf("unable to start server: %s", err)
+		return fmt.Errorf("Unable to start server: %w", err)
 	}
 	defer server.Stop()
 
-	log.Printf("%-8s %v:%v", "Server:", ip, port)
-	log.Printf("%-8s http://%v:%v", "UI:", ip, uiPort)
-	log.Printf("%-8s http://%v:%v/metrics", "Metrics:", ip, metricsPort)
+	ui := uiserver.NewServer(uiserveroptions.WithConfigProvider(&uiconfig.Config{
+		TemporalGRPCAddress: fmt.Sprintf("%s:%d", ip, port),
+		Host:                ip,
+		Port:                uiPort,
+		EnableUI:            true,
+		CORS:                uiconfig.CORS{CookieInsecure: true},
+		HideLogs:            true,
+	}))
+
+	go func() {
+		if err := ui.Start(); err != nil && err != http.ErrServerClosed {
+			logger.Error("Temporal UI server error", logger.Ctx{"err": err})
+		}
+	}()
+
+	logger.Warn("Temporal server started", logger.Ctx{"address": ip + ":" + strconv.Itoa(port)})
+	logger.Warn("Temporal UI started", logger.Ctx{"url": "http://" + ip + ":" + strconv.Itoa(uiPort)})
+	logger.Warn("Temporal metrics started", logger.Ctx{"url": "http://" + ip + ":" + strconv.Itoa(metricsPort) + "/metrics"})
 
 	// inform worker and client goroutines that server is ready
-	temporalServerReady.Signal()
+	temporalServerReady.Cancel()
 
 	// Wait for a signal to exit
 	<-ctx.Done()
-	log.Printf("Stopping Temporal server as context was canceled...")
+	logger.Warn("Stopping Temporal server as context was canceled...")
+
+	return nil
 }

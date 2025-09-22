@@ -106,7 +106,7 @@ func instanceState(d *Daemon, r *http.Request) response.Response {
 	// 	return response.InternalError(err)
 	// }
 
-	state, err := temporal.GetInstanceState(projectName, name)
+	state, err := temporal.GetInstanceState(s.ShutdownCtx, projectName, name)
 	if err != nil {
 		return response.SmartError(err)
 	}

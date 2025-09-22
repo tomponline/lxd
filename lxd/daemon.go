@@ -2094,7 +2094,7 @@ func (d *Daemon) init() error {
 	logger.Info("Daemon started")
 
 	//now cluster db is ready. we can go
-	temporal.Init(d.State, d.shutdownCtx, d.db)
+	temporal.Init(d.shutdownCtx, d.State, d.db)
 
 	return nil
 }

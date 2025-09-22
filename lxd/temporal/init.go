@@ -3,14 +3,16 @@ package temporal
 import (
 	"context"
 	"fmt"
-	"log"
 	"strings"
-	"sync"
+	"time"
+
+	_ "github.com/mattn/go-sqlite3"
+	"go.temporal.io/sdk/client"
 
 	"github.com/canonical/lxd/lxd/db"
 	"github.com/canonical/lxd/lxd/state"
+	"github.com/canonical/lxd/shared/cancel"
 	"github.com/canonical/lxd/shared/logger"
-	_ "github.com/mattn/go-sqlite3"
 )
 
 const (
@@ -19,13 +21,11 @@ const (
 
 var SQLDriverName string
 
-var temporalServerReady *flagCond
+var temporalServerReady = cancel.New()
 
 var daemonState func() *state.State
 
-func Init(stateFunc func() *state.State, ctx context.Context, db *db.DB) {
-	var wg sync.WaitGroup
-
+func Init(ctx context.Context, stateFunc func() *state.State, db *db.DB) {
 	s := stateFunc()
 
 	nodeId := int(db.Cluster.GetNodeID())
@@ -39,28 +39,70 @@ func Init(stateFunc func() *state.State, ctx context.Context, db *db.DB) {
 
 	// no serious reason behind this, only for simplicity sake
 	if nodeId < 1 || nodeId > 9 {
-		log.Fatalf("node_id must be in range 1..9")
+		logger.Error("Temporal node_id must be in range 1..9")
+		return
 	}
 
 	logger.Warn("Initializing Temporal services", logger.Ctx{"node_id": nodeId, "ip": ip, "basePort": basePort, "uuid": clusterID})
 
-	identity := fmt.Sprintf("node%d", nodeId)
-
 	SQLDriverName = db.Cluster.DriverName
-
-	temporalServerReady = NewFlagCond()
 
 	// time for ugly hacks...
 	daemonState = stateFunc
 
-	wg.Add(3)
-	go servermain(ctx, &wg, db, ip, basePort, clusterID, nodeId)
-	go workermain(ctx, &wg, identity, fmt.Sprintf("%s:%d", ip, basePort))
-	go clientmain(ctx, &wg, identity, fmt.Sprintf("%s:%d", ip, basePort))
+	go func() {
+		for {
+			err := servermain(ctx, ip, basePort, clusterID)
+			if err != nil {
+				logger.Error("Temporal server failed", logger.Ctx{"err": err})
+				time.Sleep(time.Second)
+				continue
+			} else {
+				return
+			}
+		}
+	}()
 
-	go func(wg *sync.WaitGroup) {
-		logger.Warn("Waiting for Temporal shutdown...")
-		wg.Wait()
-		fmt.Println("Temporal shutdown.")
-	}(&wg)
+	identity := fmt.Sprintf("node%d", nodeId)
+
+	<-temporalServerReady.Done()
+
+	for {
+		hostAddress := fmt.Sprintf("%s:%d", ip, basePort)
+		logger.Warn("Temporal client connecting to server", logger.Ctx{"identity": identity, "address": hostAddress})
+		var err error
+		clientPtr, err = client.Dial(client.Options{
+			Identity: identity,
+			HostPort: hostAddress,
+			Logger:   NewTemporalLogger(logger.Log),
+		})
+		if err != nil {
+			logger.Error("Temporal client failed to connect to server", logger.Ctx{"err": err})
+			time.Sleep(time.Second)
+			continue
+		}
+
+		logger.Warn("Temporal client connected to server", logger.Ctx{"identity": identity, "address": hostAddress})
+		break
+	}
+
+	go func() {
+		err := executeHelloWorldWorkflow(ctx, identity)
+		if err != nil {
+			logger.Error("Temporal workflow failed to execute", logger.Ctx{"err": err})
+		}
+	}()
+
+	go func() {
+		<-temporalServerReady.Done()
+		for {
+			err := workermain(ctx)
+			if err != nil {
+				logger.Error("Temporal worker failed", logger.Ctx{"err": err})
+				time.Sleep(time.Second)
+			} else {
+				return
+			}
+		}
+	}()
 }

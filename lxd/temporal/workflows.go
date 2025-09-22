@@ -3,7 +3,6 @@ package temporal
 import (
 	"context"
 	"fmt"
-	"log"
 	"net"
 	"time"
 
@@ -56,24 +55,24 @@ func GetInstanceStateWorkflow(ctx workflow.Context, projectName string, instance
 	return &result, err
 }
 
-func GetInstanceState(projectName string, instanceName string) (*api.InstanceState, error) {
+func GetInstanceState(ctx context.Context, projectName string, instanceName string) (*api.InstanceState, error) {
 	c, err := GetClient()
 	if err != nil {
-		log.Fatalf("client failed to get a temporal client: %s", err)
+		return nil, fmt.Errorf("Client failed to get a temporal client: %w", err)
 	}
 
-	run, err := c.ExecuteWorkflow(context.Background(), client.StartWorkflowOptions{
+	run, err := c.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
 		ID:        GetInstanceStateWorkflowID,
 		TaskQueue: LXDTaskQueue,
 	}, GetInstanceStateWorkflow, projectName, instanceName)
 	if err != nil {
-		log.Fatalf("workflow failed to complete: %s", err)
+		return nil, fmt.Errorf("Workflow failed to complete: %w", err)
 	}
 
 	var result api.InstanceState
 	err = run.Get(context.Background(), &result)
 	if err != nil {
-		log.Fatalln("failed to get workflow result", err)
+		return nil, fmt.Errorf("Failed to get workflow result: %w", err)
 	}
 
 	//log.Printf("WorkflowID: %s RunID: %s Result: %v", run.GetID(), run.GetRunID(), result)
