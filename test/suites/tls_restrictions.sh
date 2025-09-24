@@ -46,6 +46,44 @@ test_tls_restrictions() {
   # Allow access to project blah
   lxc config trust show "${FINGERPRINT}" | sed -e "s/projects: \[\]/projects: ['blah']/" -e "s/restricted: false/restricted: true/" | lxc config trust edit "${FINGERPRINT}"
 
+  # The restricted caller can listen for events on all projects, but the events are filtered to only those in the projects they have access to.
+  monfile_root="${TEST_DIR}/mon-root.jsonl"
+  lxc monitor --all-projects --type lifecycle --format json > "${monfile_root}" &
+  mon_root_pid=$!
+  sleep 0.1
+
+  monfile_restricted="${TEST_DIR}/mon-restricted.jsonl"
+  lxc remote switch localhost
+  lxc monitor --all-projects --format json > "${monfile_restricted}" &
+  mon_restricted_pid=$!
+  sleep 0.1
+
+  lxc remote switch local
+  lxc storage volume create "${pool_name}" vol1
+  lxc profile create p1 --project blah
+
+  kill -9 "${mon_root_pid}" || true
+  kill -9 "${mon_restricted_pid}" || true
+
+  # The events for the restricted caller should have only the profile creation lifecycle event because this occurred
+  # "blah". The storage volume creation event should not be visible because it occurred in "default".
+  jq -s -e 'length == 1 and .[0].type == "lifecycle" and .[0].metadata.action == "profile-created"' "${monfile_restricted}"
+
+  # Whereas events for the root user will contain both storage volume and profile creation events.
+  jq -s -e 'length == 2 and .[1].metadata.action == "profile-created" and .[0].metadata.action == "storage-volume-created"' "${monfile_root}"
+
+  # Clean up event filtering checks
+  lxc profile delete p1 --project blah
+  lxc storage volume delete "${pool_name}" vol1
+  rm "${monfile_restricted}"
+  rm "${monfile_root}"
+
+  # The restricted caller is able to list operations for all projects, but this is filtered to only show operations they have access to.
+  lxd_websocket_operation foo 1s &
+  lxd_websocket_operation bar 1s blah &
+  [ "$(lxc operation list --all-projects -f csv | grep -Fc 'Executing command')" = 2 ] # Two exec operations exist
+  [ "$(lxc_remote operation list localhost: --all-projects -f csv | wc -l)" = 1 ] # Restricted caller can only view the one in project blah
+
   # Validate restricted view
   ! lxc_remote project list localhost: | grep -wF default || false
   lxc_remote project list localhost: | grep -wF blah
@@ -430,7 +468,7 @@ test_certificate_edit() {
 
   # Try replacing the old certificate with a new one.
   # This should succeed as the user is listed as an admin.
-  my_curl -X PATCH --fail-with-body -H 'Content-Type: application/json' -d "{\"certificate\":\"$(sed ':a;N;$!ba;s/\n/\\n/g' "${LXD_CONF}/client-new.crt")\"}" "https://${LXD_ADDR}/1.0/certificates/${FINGERPRINT}"
+  my_curl -X PATCH --fail-with-body -H 'Content-Type: application/json' -d '{"certificate":"'"$(sed ':a;N;$!ba;s/\n/\\n/g' "${LXD_CONF}/client-new.crt")"'"}' "https://${LXD_ADDR}/1.0/certificates/${FINGERPRINT}"
 
   # Record new fingerprint
   FINGERPRINT="$(lxc config trust list --format csv | cut -d, -f4)"
@@ -452,7 +490,7 @@ test_certificate_edit() {
 
   # Try replacing the new certificate with the old one.
   # This should succeed as well as the certificate may be changed.
-  my_curl -X PATCH --fail-with-body -H 'Content-Type: application/json' -d "{\"certificate\":\"$(sed ':a;N;$!ba;s/\n/\\n/g' "${LXD_CONF}/client.crt.bak")\"}" "https://${LXD_ADDR}/1.0/certificates/${FINGERPRINT}"
+  my_curl -X PATCH --fail-with-body -H 'Content-Type: application/json' -d '{"certificate":"'"$(sed ':a;N;$!ba;s/\n/\\n/g' "${LXD_CONF}/client.crt.bak")"'"}' "https://${LXD_ADDR}/1.0/certificates/${FINGERPRINT}"
 
   # Move new certificate and key to LXD_CONF.
   mv "${LXD_CONF}/client.crt.bak" "${LXD_CONF}/client.crt"
@@ -464,15 +502,15 @@ test_certificate_edit() {
   # Trying to change other fields should fail as a non-admin.
   ! lxc_remote config trust show "${FINGERPRINT}" | sed -e "s/restricted: true/restricted: false/" | lxc_remote config trust edit localhost:"${FINGERPRINT}" || false
 
-  [ "$(my_curl -X PATCH -H 'Content-Type: application/json' -d "{\"restricted\": false}" "https://${LXD_ADDR}/1.0/certificates/${FINGERPRINT}" | jq -r '.error_code')" -eq 403 ]
+  [ "$(my_curl -X PATCH -H 'Content-Type: application/json' -d '{"restricted": false}' "https://${LXD_ADDR}/1.0/certificates/${FINGERPRINT}" | jq -r '.error_code')" -eq 403 ]
 
   ! lxc_remote config trust show "${FINGERPRINT}" | sed -e "s/name:.*/name: bar/" | lxc_remote config trust edit localhost:"${FINGERPRINT}" || false
 
-  [ "$(my_curl -X PATCH -H 'Content-Type: application/json' -d "{\"name\": \"bar\"}" "https://${LXD_ADDR}/1.0/certificates/${FINGERPRINT}" | jq -r '.error_code')" -eq 403 ]
+  [ "$(my_curl -X PATCH -H 'Content-Type: application/json' -d '{"name": "bar"}' "https://${LXD_ADDR}/1.0/certificates/${FINGERPRINT}" | jq -r '.error_code')" -eq 403 ]
 
   ! lxc_remote config trust show "${FINGERPRINT}" | sed -e ':a;N;$!ba;s/projects:\n- blah/projects: \[\]/' | lxc_remote config trust edit localhost:"${FINGERPRINT}" || false
 
-  [ "$(my_curl -X PATCH -H 'Content-Type: application/json' -d "{\"projects\": []}" "https://${LXD_ADDR}/1.0/certificates/${FINGERPRINT}" | jq -r '.error_code')" -eq 403 ]
+  [ "$(my_curl -X PATCH -H 'Content-Type: application/json' -d '{"projects": []}' "https://${LXD_ADDR}/1.0/certificates/${FINGERPRINT}" | jq -r '.error_code')" -eq 403 ]
 
   # Cleanup
   lxc config trust show "${FINGERPRINT}" | sed -e "s/restricted: true/restricted: false/" | lxc config trust edit "${FINGERPRINT}"
