@@ -29,6 +29,8 @@ func workermain(ctx context.Context) error {
 	w.RegisterWorkflow(GetInstanceStateWorkflow)
 	w.RegisterActivity(GetInstanceStateActivity)
 
+	w.RegisterWorkflow(ExtendProjectStorageSchemaWorkflow)
+
 	if err := w.Start(); err != nil {
 		return fmt.Errorf("Failed to start worker: %w", err)
 	}
