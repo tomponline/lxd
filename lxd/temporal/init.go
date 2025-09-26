@@ -63,7 +63,7 @@ func Init(ctx context.Context, stateFunc func() *state.State, db *db.DB) {
 		}
 	}()
 
-	identity := fmt.Sprintf("node%d", nodeId)
+	identity := s.ServerName
 
 	<-temporalServerReady.Done()
 
