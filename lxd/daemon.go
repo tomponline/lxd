@@ -2637,6 +2637,8 @@ func (d *Daemon) temporalWorker(ctx context.Context) error {
 	logger.Warn("Starting Temporal worker")
 
 	w := temporalWorker.New(d.temporalClient, temporal.LXDTaskQueue, temporalWorker.Options{})
+	w.RegisterWorkflow(temporal.GreetingWorkflow)
+	w.RegisterActivity(temporal.ComposeGreeting)
 
 	if err := w.Start(); err != nil {
 		return fmt.Errorf("Failed to start worker: %w", err)
@@ -2708,6 +2710,13 @@ func (d *Daemon) temporalInit(ctx context.Context, db *db.DB) {
 		logger.Warn("Temporal client connected to server", logger.Ctx{"identity": identity, "address": hostAddress})
 		break
 	}
+
+	go func() {
+		err := temporal.ExecuteHelloWorldWorkflow(ctx, d.temporalClient, identity)
+		if err != nil {
+			logger.Error("Temporal workflow failed to execute", logger.Ctx{"err": err})
+		}
+	}()
 
 	go func() {
 		<-temporal.ServerReady.Done()
