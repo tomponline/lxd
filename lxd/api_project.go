@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/gorilla/mux"
 
@@ -31,6 +32,7 @@ import (
 	"github.com/canonical/lxd/lxd/request"
 	"github.com/canonical/lxd/lxd/response"
 	"github.com/canonical/lxd/lxd/state"
+	"github.com/canonical/lxd/lxd/temporal"
 	"github.com/canonical/lxd/lxd/util"
 	"github.com/canonical/lxd/shared"
 	"github.com/canonical/lxd/shared/api"
@@ -290,6 +292,9 @@ func projectUsedBy(ctx context.Context, tx *db.ClusterTx, project *dbCluster.Pro
 //	    $ref: "#/responses/Forbidden"
 //	  "500":
 //	    $ref: "#/responses/InternalServerError"
+
+var counter int
+
 func projectsPost(d *Daemon, r *http.Request) response.Response {
 	s := d.State()
 
@@ -325,13 +330,6 @@ func projectsPost(d *Daemon, r *http.Request) response.Response {
 		return response.BadRequest(err)
 	}
 
-	// Extend the node config schema with the project-specific config keys.
-	// Otherwise the node config schema validation will not allow setting of these keys.
-	node.ConfigSchema.Lock()
-	node.ConfigSchema.Types["storage.project."+project.Name+".images_volume"] = config.Key{}
-	node.ConfigSchema.Types["storage.project."+project.Name+".backups_volume"] = config.Key{}
-	node.ConfigSchema.Unlock()
-
 	requestor, err := request.GetRequestor(r.Context())
 	if err != nil {
 		return response.SmartError(err)
@@ -339,51 +337,44 @@ func projectsPost(d *Daemon, r *http.Request) response.Response {
 
 	// On other cluster nodes, we're done.
 	if requestor.IsClusterNotification() {
+		if s.ServerName == "temporal4" {
+			counter++
+			switch counter % 4 {
+			case 0:
+				// Let it pass
+				temporal.ExtendLocalConfigSchemaForProject(project.Name)
+				return response.SyncResponse(true, nil)
+			case 1:
+				// Fail
+				fmt.Println("Artificial failure!")
+				return response.SmartError(errors.New("local Artificial failure"))
+			case 2:
+				// Panic
+				fmt.Println("Artificial panic!")
+				panic("local Artificial panic")
+			case 3:
+				// Pass after a loong sleep which should trigger timeout
+				fmt.Println("local projectsPost: sleeping")
+				select {
+				case <-r.Context().Done():
+					fmt.Println("local projectsPost: request cancelled")
+					return response.SmartError(r.Context().Err())
+				case <-time.After(20 * time.Second):
+					fmt.Println("local projectsPost: sleep done")
+				}
+				temporal.ExtendLocalConfigSchemaForProject(project.Name)
+				return response.SyncResponse(true, nil)
+			}
+		}
+
+		temporal.ExtendLocalConfigSchemaForProject(project.Name)
 		return response.SyncResponse(true, nil)
 	}
 
-	// Send notification to other cluster members to extend the node schema.
-	notifier, err := cluster.NewNotifier(s, s.Endpoints.NetworkCert(), s.ServerCert(), cluster.NotifyAlive)
+	err = temporal.CreateProjectWithTemporal(d.temporalClient, project)
 	if err != nil {
-		return response.SmartError(err)
-	}
+		fmt.Println("ExtendProjectStorageSchemaWithTemporal failed: ", err)
 
-	err = notifier(func(member db.NodeInfo, client lxd.InstanceServer) error {
-		return client.CreateProject(project)
-	})
-	if err != nil {
-		return response.SmartError(fmt.Errorf("Failed to notify other cluster members: %w", err))
-	}
-
-	var id int64
-	err = s.DB.Cluster.Transaction(r.Context(), func(ctx context.Context, tx *db.ClusterTx) error {
-		id, err = dbCluster.CreateProject(ctx, tx.Tx(), dbCluster.Project{Description: project.Description, Name: project.Name})
-		if err != nil {
-			return fmt.Errorf("Failed adding database record: %w", err)
-		}
-
-		err = dbCluster.CreateProjectConfig(ctx, tx.Tx(), id, project.Config)
-		if err != nil {
-			return fmt.Errorf("Unable to create project config for project %q: %w", project.Name, err)
-		}
-
-		if shared.IsTrue(project.Config["features.profiles"]) {
-			err = projectCreateDefaultProfile(ctx, tx, project.Name, project.StoragePool, project.Network)
-			if err != nil {
-				return err
-			}
-
-			if project.Config["features.images"] == "false" {
-				err = dbCluster.InitProjectWithoutImages(ctx, tx.Tx(), project.Name)
-				if err != nil {
-					return err
-				}
-			}
-		}
-
-		return nil
-	})
-	if err != nil {
 		if api.StatusErrorCheck(err, http.StatusConflict) {
 			return response.Conflict(fmt.Errorf("Project %q already exists", project.Name))
 		}
@@ -395,55 +386,6 @@ func projectsPost(d *Daemon, r *http.Request) response.Response {
 	s.Events.SendLifecycle(project.Name, lc)
 
 	return response.SyncResponseLocation(true, nil, lc.Source)
-}
-
-// Create the default profile of a project.
-func projectCreateDefaultProfile(ctx context.Context, tx *db.ClusterTx, project string, storagePool string, network string) error {
-	// Create a default profile
-	profile := dbCluster.Profile{}
-	profile.Project = project
-	profile.Name = api.ProjectDefaultName
-	profile.Description = "Default LXD profile for project " + project
-
-	profileID, err := dbCluster.CreateProfile(ctx, tx.Tx(), profile)
-	if err != nil {
-		return fmt.Errorf("Add default profile to database: %w", err)
-	}
-
-	devices := map[string]dbCluster.Device{}
-	if storagePool != "" {
-		rootDev := map[string]string{}
-		rootDev["path"] = "/"
-		rootDev["pool"] = storagePool
-		device := dbCluster.Device{
-			Name:   "root",
-			Type:   dbCluster.TypeDisk,
-			Config: rootDev,
-		}
-
-		devices["root"] = device
-	}
-
-	if network != "" {
-		networkDev := map[string]string{}
-		networkDev["network"] = network
-		device := dbCluster.Device{
-			Name:   "eth0",
-			Type:   dbCluster.TypeNIC,
-			Config: networkDev,
-		}
-
-		devices["eth0"] = device
-	}
-
-	if len(devices) > 0 {
-		err = dbCluster.CreateProfileDevices(context.TODO(), tx.Tx(), profileID, devices)
-		if err != nil {
-			return fmt.Errorf("Add root device to default profile of new project: %w", err)
-		}
-	}
-
-	return nil
 }
 
 // swagger:operation GET /1.0/projects/{name} projects project_get
@@ -816,7 +758,7 @@ func projectChange(ctx context.Context, s *state.State, project *api.Project, re
 
 		if slices.Contains(configChanged, "features.profiles") {
 			if shared.IsTrue(req.Config["features.profiles"]) {
-				err = projectCreateDefaultProfile(ctx, tx, project.Name, "", "")
+				err = temporal.ProjectCreateDefaultProfile(ctx, tx, project.Name, "", "")
 				if err != nil {
 					return err
 				}
@@ -1035,6 +977,7 @@ func projectPost(d *Daemon, r *http.Request) response.Response {
 }
 
 func projectNodeConfigDelete(d *Daemon, s *state.State, name string) error {
+	fmt.Println("local ProjectNodeConfigDelete")
 	var config *node.Config
 	imagesVolumeConfig := "storage.project." + name + ".images_volume"
 	backupsVolumeConfig := "storage.project." + name + ".backups_volume"
