@@ -2643,6 +2643,8 @@ func (d *Daemon) temporalWorker(ctx context.Context) error {
 	w.RegisterWorkflow(temporal.GetInstanceStateWorkflow)
 	w.RegisterActivity(temporal.GetInstanceStateActivity)
 
+	w.RegisterWorkflow(temporal.ExtendProjectStorageSchemaWorkflow)
+
 	if err := w.Start(); err != nil {
 		return fmt.Errorf("Failed to start worker: %w", err)
 	}
