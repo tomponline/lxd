@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"net/url"
 	"time"
@@ -17,6 +16,7 @@ import (
 	"github.com/canonical/lxd/lxd/operations"
 	"github.com/canonical/lxd/lxd/request"
 	"github.com/canonical/lxd/lxd/response"
+	"github.com/canonical/lxd/lxd/temporal"
 	"github.com/canonical/lxd/shared"
 	"github.com/canonical/lxd/shared/api"
 	"github.com/canonical/lxd/shared/version"
@@ -95,15 +95,20 @@ func instanceState(d *Daemon, r *http.Request) response.Response {
 		return resp
 	}
 
-	c, err := instance.LoadByProjectAndName(s, projectName, name)
+	// c, err := instance.LoadByProjectAndName(s, projectName, name)
+	// if err != nil {
+	// 	return response.SmartError(err)
+	// }
+
+	// hostInterfaces, _ := net.Interfaces()
+	// state, err := c.RenderState(hostInterfaces)
+	// if err != nil {
+	// 	return response.InternalError(err)
+	// }
+
+	state, err := temporal.GetInstanceState(s.ShutdownCtx, d.temporalClient, projectName, name)
 	if err != nil {
 		return response.SmartError(err)
-	}
-
-	hostInterfaces, _ := net.Interfaces()
-	state, err := c.RenderState(hostInterfaces)
-	if err != nil {
-		return response.InternalError(err)
 	}
 
 	return response.SyncResponse(true, state)
