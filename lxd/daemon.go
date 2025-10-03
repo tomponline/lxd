@@ -25,6 +25,8 @@ import (
 	"github.com/canonical/go-dqlite/v3/driver"
 	"github.com/gorilla/mux"
 	liblxc "github.com/lxc/go-lxc"
+	temporalClient "go.temporal.io/sdk/client"
+	temporalWorker "go.temporal.io/sdk/worker"
 	"golang.org/x/sys/unix"
 
 	"github.com/canonical/lxd/lxd/acme"
@@ -69,6 +71,7 @@ import (
 	"github.com/canonical/lxd/lxd/storage/s3/miniod"
 	"github.com/canonical/lxd/lxd/sys"
 	"github.com/canonical/lxd/lxd/task"
+	"github.com/canonical/lxd/lxd/temporal"
 	"github.com/canonical/lxd/lxd/ubuntupro"
 	"github.com/canonical/lxd/lxd/ucred"
 	"github.com/canonical/lxd/lxd/util"
@@ -174,6 +177,8 @@ type Daemon struct {
 	// internalSecrets holds the current in-memory value of the secrets
 	internalSecrets   dbCluster.AuthSecrets
 	internalSecretsMu sync.Mutex
+
+	temporalClient temporalClient.Client
 }
 
 // DaemonConfig holds configuration values for Daemon.
@@ -2039,6 +2044,9 @@ func (d *Daemon) init() error {
 
 	logger.Info("Daemon started")
 
+	// Start temporal.
+	d.temporalInit(d.shutdownCtx, d.db)
+
 	return nil
 }
 
@@ -2623,4 +2631,94 @@ func (d *Daemon) nodeRefreshTask(heartbeatData *cluster.APIHeartbeat, isLeader b
 	}
 
 	wg.Wait()
+}
+
+func (d *Daemon) temporalWorker(ctx context.Context) error {
+	logger.Warn("Starting Temporal worker")
+
+	w := temporalWorker.New(d.temporalClient, temporal.LXDTaskQueue, temporalWorker.Options{})
+
+	if err := w.Start(); err != nil {
+		return fmt.Errorf("Failed to start worker: %w", err)
+	}
+	defer w.Stop()
+
+	logger.Warn("Temporal worker started")
+
+	// Wait for a signal to exit
+	<-ctx.Done()
+	logger.Warn("Stopping Temporal worker as context was canceled...")
+
+	return nil
+}
+
+func (d *Daemon) temporalInit(ctx context.Context, db *db.DB) {
+	nodeId := int(db.Cluster.GetNodeID())
+	ip, _, _ := strings.Cut(d.localConfig.HTTPSAddress(), ":")
+	if ip == "" {
+		ip = "127.0.0.1"
+	}
+
+	basePort := 5233
+	clusterID := d.globalConfig.ClusterUUID()
+
+	// no serious reason behind this, only for simplicity sake
+	if nodeId < 1 || nodeId > 9 {
+		logger.Error("Temporal node_id must be in range 1..9")
+		return
+	}
+
+	// Make daemon state available to activies..
+	temporal.StateFunc = d.State
+
+	logger.Warn("Initializing Temporal services", logger.Ctx{"node_id": nodeId, "ip": ip, "basePort": basePort, "uuid": clusterID})
+
+	go func() {
+		for {
+			err := temporal.ServerMain(ctx, db.Cluster.TemporalDriverName, ip, basePort, clusterID)
+			if err != nil {
+				logger.Error("Temporal server failed", logger.Ctx{"err": err})
+				time.Sleep(time.Second)
+				continue
+			} else {
+				return
+			}
+		}
+	}()
+
+	identity := d.serverName
+
+	<-temporal.ServerReady.Done()
+
+	for {
+		hostAddress := fmt.Sprintf("%s:%d", ip, basePort)
+		logger.Warn("Temporal client connecting to server", logger.Ctx{"identity": identity, "address": hostAddress})
+		var err error
+		d.temporalClient, err = temporalClient.Dial(temporalClient.Options{
+			Identity: identity,
+			HostPort: hostAddress,
+			Logger:   temporal.NewTemporalLogger(logger.Log),
+		})
+		if err != nil {
+			logger.Error("Temporal client failed to connect to server", logger.Ctx{"err": err})
+			time.Sleep(time.Second)
+			continue
+		}
+
+		logger.Warn("Temporal client connected to server", logger.Ctx{"identity": identity, "address": hostAddress})
+		break
+	}
+
+	go func() {
+		<-temporal.ServerReady.Done()
+		for {
+			err := d.temporalWorker(ctx)
+			if err != nil {
+				logger.Error("Temporal worker failed", logger.Ctx{"err": err})
+				time.Sleep(time.Second)
+			} else {
+				return
+			}
+		}
+	}()
 }
