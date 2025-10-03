@@ -2640,6 +2640,9 @@ func (d *Daemon) temporalWorker(ctx context.Context) error {
 	w.RegisterWorkflow(temporal.GreetingWorkflow)
 	w.RegisterActivity(temporal.ComposeGreeting)
 
+	w.RegisterWorkflow(temporal.GetInstanceStateWorkflow)
+	w.RegisterActivity(temporal.GetInstanceStateActivity)
+
 	if err := w.Start(); err != nil {
 		return fmt.Errorf("Failed to start worker: %w", err)
 	}
