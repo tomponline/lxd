@@ -2659,6 +2659,27 @@ func (d *Daemon) temporalWorker(ctx context.Context) error {
 	return nil
 }
 
+func (d *Daemon) temporalPerNodeWorker(ctx context.Context) error {
+	logger.Warn("Starting Temporal Per Node worker")
+
+	w := temporalWorker.New(d.temporalClient, temporal.LXDTaskQueue+d.serverName, temporalWorker.Options{})
+	w.RegisterWorkflow(temporal.ExtendProjectStorageSchemaWorkflowPerNode)
+	w.RegisterActivity(temporal.ExtendProjectStorageSchemaOnThisNodeActivity)
+
+	if err := w.Start(); err != nil {
+		return fmt.Errorf("Failed to start per node worker: %w", err)
+	}
+	defer w.Stop()
+
+	logger.Warn("Temporal per node worker started")
+
+	// Wait for a signal to exit
+	<-ctx.Done()
+	logger.Warn("Stopping Temporal per node worker as context was canceled...")
+
+	return nil
+}
+
 func (d *Daemon) temporalInit(ctx context.Context, db *db.DB) {
 	nodeId := int(db.Cluster.GetNodeID())
 	ip, _, _ := strings.Cut(d.localConfig.HTTPSAddress(), ":")
@@ -2729,6 +2750,19 @@ func (d *Daemon) temporalInit(ctx context.Context, db *db.DB) {
 			err := d.temporalWorker(ctx)
 			if err != nil {
 				logger.Error("Temporal worker failed", logger.Ctx{"err": err})
+				time.Sleep(time.Second)
+			} else {
+				return
+			}
+		}
+	}()
+
+	go func() {
+		<-temporal.ServerReady.Done()
+		for {
+			err := d.temporalPerNodeWorker(ctx)
+			if err != nil {
+				logger.Error("Temporal per node worker failed", logger.Ctx{"err": err})
 				time.Sleep(time.Second)
 			} else {
 				return

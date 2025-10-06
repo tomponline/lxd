@@ -373,7 +373,8 @@ func projectsPost(d *Daemon, r *http.Request) response.Response {
 		return response.SyncResponse(true, nil)
 	}
 
-	err = temporal.CreateProjectWithTemporal(d.temporalClient, project)
+	// err = temporal.CreateProjectWithTemporal(d.temporalClient, project)
+	err = temporal.CreateProjectWithTemporalPerNode(d.serverName, d.temporalClient, project)
 	if err != nil {
 		if api.StatusErrorCheck(err, http.StatusConflict) {
 			return response.Conflict(fmt.Errorf("Project %q already exists", project.Name))
