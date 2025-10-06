@@ -34,8 +34,6 @@ func ExtendLocalConfigSchemaForProject(projectName string) {
 	node.ConfigSchema.Types["storage.project."+projectName+".images_volume"] = config.Key{}
 	node.ConfigSchema.Types["storage.project."+projectName+".backups_volume"] = config.Key{}
 	node.ConfigSchema.Unlock()
-
-	fmt.Println("ERSIN local project schema extended")
 }
 
 // Create the default profile of a project.
@@ -117,8 +115,6 @@ func DeleteLocalConfigSchemaForProject(projectName string) {
 	delete(node.ConfigSchema.Types, "storage.project."+projectName+".images_volume")
 	delete(node.ConfigSchema.Types, "storage.project."+projectName+".backups_volume")
 	node.ConfigSchema.Unlock()
-
-	fmt.Println("local node config delete")
 }
 
 func CompensateExtendProjectStorageSchemaActivity(ctx context.Context, peer db.NodeInfo, project api.ProjectsPost) error {

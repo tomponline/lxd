@@ -12,7 +12,7 @@ import (
 	"net/url"
 	"slices"
 	"strings"
-	"time"
+	// "time"
 
 	"github.com/gorilla/mux"
 
@@ -337,35 +337,37 @@ func projectsPost(d *Daemon, r *http.Request) response.Response {
 
 	// On other cluster nodes, we're done.
 	if requestor.IsClusterNotification() {
-		if s.ServerName == "temporal4" {
-			counter++
-			switch counter % 4 {
-			case 0:
-				// Let it pass
-				temporal.ExtendLocalConfigSchemaForProject(project.Name)
-				return response.SyncResponse(true, nil)
-			case 1:
-				// Fail
-				fmt.Println("Artificial failure!")
-				return response.SmartError(errors.New("local Artificial failure"))
-			case 2:
-				// Panic
-				fmt.Println("Artificial panic!")
-				panic("local Artificial panic")
-			case 3:
-				// Pass after a loong sleep which should trigger timeout
-				fmt.Println("local projectsPost: sleeping")
-				select {
-				case <-r.Context().Done():
-					fmt.Println("local projectsPost: request cancelled")
-					return response.SmartError(r.Context().Err())
-				case <-time.After(20 * time.Second):
-					fmt.Println("local projectsPost: sleep done")
+		/*
+			if s.ServerName == "temporal4" {
+				counter++
+				switch counter % 4 {
+				case 0:
+					// Let it pass
+					temporal.ExtendLocalConfigSchemaForProject(project.Name)
+					return response.SyncResponse(true, nil)
+				case 1:
+					// Fail
+					fmt.Println("Artificial failure!")
+					return response.SmartError(errors.New("local Artificial failure"))
+				case 2:
+					// Panic
+					fmt.Println("Artificial panic!")
+					panic("local Artificial panic")
+				case 3:
+					// Pass after a loong sleep which should trigger timeout
+					fmt.Println("local projectsPost: sleeping")
+					select {
+					case <-r.Context().Done():
+						fmt.Println("local projectsPost: request cancelled")
+						return response.SmartError(r.Context().Err())
+					case <-time.After(20 * time.Second):
+						fmt.Println("local projectsPost: sleep done")
+					}
+					temporal.ExtendLocalConfigSchemaForProject(project.Name)
+					return response.SyncResponse(true, nil)
 				}
-				temporal.ExtendLocalConfigSchemaForProject(project.Name)
-				return response.SyncResponse(true, nil)
 			}
-		}
+		*/
 
 		temporal.ExtendLocalConfigSchemaForProject(project.Name)
 		return response.SyncResponse(true, nil)
@@ -373,8 +375,6 @@ func projectsPost(d *Daemon, r *http.Request) response.Response {
 
 	err = temporal.CreateProjectWithTemporal(d.temporalClient, project)
 	if err != nil {
-		fmt.Println("ExtendProjectStorageSchemaWithTemporal failed: ", err)
-
 		if api.StatusErrorCheck(err, http.StatusConflict) {
 			return response.Conflict(fmt.Errorf("Project %q already exists", project.Name))
 		}
@@ -977,7 +977,6 @@ func projectPost(d *Daemon, r *http.Request) response.Response {
 }
 
 func projectNodeConfigDelete(d *Daemon, s *state.State, name string) error {
-	fmt.Println("local ProjectNodeConfigDelete")
 	var config *node.Config
 	imagesVolumeConfig := "storage.project." + name + ".images_volume"
 	backupsVolumeConfig := "storage.project." + name + ".backups_volume"
