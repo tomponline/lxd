@@ -9,12 +9,15 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/canonical/go-dqlite/v3/driver"
+	"github.com/qustavo/sqlhooks/v2"
 
 	"github.com/canonical/lxd/lxd/auth"
 	"github.com/canonical/lxd/lxd/db/query"
 	"github.com/canonical/lxd/lxd/db/schema"
+	"github.com/canonical/lxd/lxd/metrics"
 	"github.com/canonical/lxd/lxd/util"
 	"github.com/canonical/lxd/shared"
 	"github.com/canonical/lxd/shared/api"
@@ -23,6 +26,28 @@ import (
 	"github.com/canonical/lxd/shared/version"
 )
 
+// Hooks satisfies the sqlhook.Hooks interface
+type Hooks struct {
+	name    string
+	metrics *metrics.SQLMetrics
+}
+
+// Before hook will print the query with it's args and return the context with the timestamp
+func (h *Hooks) Before(ctx context.Context, query string, args ...interface{}) (context.Context, error) {
+	// mtime, mcounter := metrics.GetSQLMetrics(h.name)
+	// fmt.Printf("(%s;%d;%s)> %s %q", h.name, mcounter, mtime, query, args)
+	return context.WithValue(ctx, "query_begin", time.Now()), nil
+}
+
+// After hook will get the timestamp registered on the Before hook and print the elapsed time
+func (h *Hooks) After(ctx context.Context, query string, args ...interface{}) (context.Context, error) {
+	begin := ctx.Value("query_begin").(time.Time)
+	queryTime := time.Since(begin)
+	h.metrics.Add(queryTime)
+	// fmt.Printf(". took: %s\n", queryTime)
+	return ctx, nil
+}
+
 // Open the cluster database object.
 //
 // The name argument is the name of the cluster database. It defaults to
@@ -30,14 +55,17 @@ import (
 //
 // The dialer argument is a function that returns a gRPC dialer that can be
 // used to connect to a database node using the gRPC SQL package.
-func Open(name string, store driver.NodeStore, options ...driver.Option) (*sql.DB, error) {
+// Returns the DB handler and the DB driver name for Temporal.
+func Open(name string, store driver.NodeStore, options ...driver.Option) (*sql.DB, string, error) {
 	driver, err := driver.New(store, options...)
 	if err != nil {
-		return nil, fmt.Errorf("Failed to create dqlite driver: %w", err)
+		return nil, "", fmt.Errorf("Failed to create dqlite driver: %w", err)
 	}
 
-	driverName := dqliteDriverName()
-	sql.Register(driverName, driver)
+	driverNameForTemporal := dqliteDriverName()
+	driverNameForLXD := dqliteDriverName()
+	sql.Register(driverNameForTemporal, sqlhooks.Wrap(driver, &Hooks{name: "temporal", metrics: metrics.GetOrInitSQLMetric("temporal")}))
+	sql.Register(driverNameForLXD, sqlhooks.Wrap(driver, &Hooks{name: "LXD", metrics: metrics.GetOrInitSQLMetric("LXD")}))
 
 	// Create the cluster db. This won't immediately establish any network
 	// connection, that will happen only when a db transaction is started
@@ -46,12 +74,12 @@ func Open(name string, store driver.NodeStore, options ...driver.Option) (*sql.D
 		name = "db.bin"
 	}
 
-	db, err := sql.Open(driverName, name)
+	db, err := sql.Open(driverNameForLXD, name)
 	if err != nil {
-		return nil, fmt.Errorf("cannot open cluster database: %w", err)
+		return nil, "", fmt.Errorf("cannot open cluster database: %w", err)
 	}
 
-	return db, nil
+	return db, driverNameForTemporal, nil
 }
 
 // EnsureSchema applies all relevant schema updates to the cluster database.
