@@ -2667,6 +2667,8 @@ func (d *Daemon) temporalPerNodeWorker(ctx context.Context) error {
 	w.RegisterWorkflow(temporal.ExtendProjectStorageSchemaWorkflowPerNode)
 	w.RegisterActivity(temporal.ExtendProjectStorageSchemaOnThisNodeActivity)
 
+	w.RegisterWorkflow(ImageDownloadWorkflow)
+
 	if err := w.Start(); err != nil {
 		return fmt.Errorf("Failed to start per node worker: %w", err)
 	}
