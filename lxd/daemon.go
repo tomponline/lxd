@@ -767,6 +767,7 @@ func (d *Daemon) State() *state.State {
 		NetworkReady:        d.waitNetworkReady,
 		StorageReady:        d.waitStorageReady,
 		CoreAuthSecrets:     d.getCoreAuthSecrets,
+		TemporalClient:      d.temporalClient,
 	}
 
 	s.LeaderInfo = func() (*state.LeaderInfo, error) {
@@ -1989,6 +1990,9 @@ func (d *Daemon) init() error {
 
 	d.tasks = task.NewGroup()
 
+	// Start temporal.
+	d.temporalInit(d.shutdownCtx, d.db)
+
 	// FIXME: There's no hard reason for which we should not run these
 	//        tasks in mock mode. However it requires that we tweak them so
 	//        they exit gracefully without blocking (something we should do
@@ -2043,9 +2047,6 @@ func (d *Daemon) init() error {
 	d.waitReady.Cancel()
 
 	logger.Info("Daemon started")
-
-	// Start temporal.
-	d.temporalInit(d.shutdownCtx, d.db)
 
 	return nil
 }
