@@ -13,6 +13,11 @@ import (
 	"slices"
 	"time"
 
+	temporalEnums "go.temporal.io/api/enums/v1"
+	temporalClient "go.temporal.io/sdk/client"
+	"go.temporal.io/sdk/temporal"
+	"go.temporal.io/sdk/workflow"
+
 	"github.com/canonical/lxd/client"
 	"github.com/canonical/lxd/lxd/db"
 	"github.com/canonical/lxd/lxd/db/cluster"
@@ -20,16 +25,14 @@ import (
 	"github.com/canonical/lxd/lxd/locking"
 	"github.com/canonical/lxd/lxd/operations"
 	"github.com/canonical/lxd/lxd/request"
-	"github.com/canonical/lxd/lxd/response"
 	"github.com/canonical/lxd/lxd/rsync"
 	"github.com/canonical/lxd/lxd/state"
+	lxdTemporal "github.com/canonical/lxd/lxd/temporal"
 	"github.com/canonical/lxd/lxd/util"
 	"github.com/canonical/lxd/shared"
 	"github.com/canonical/lxd/shared/api"
 	"github.com/canonical/lxd/shared/cancel"
-	"github.com/canonical/lxd/shared/ioprogress"
 	"github.com/canonical/lxd/shared/logger"
-	"github.com/canonical/lxd/shared/units"
 	"github.com/canonical/lxd/shared/version"
 )
 
@@ -61,9 +64,128 @@ func imageOperationLock(fingerprint string) (locking.UnlockFunc, error) {
 	return locking.Lock(context.TODO(), "ImageOperation_"+fingerprint)
 }
 
+func ImageDownloadWorkflow(ctx workflow.Context, fingerprint string, args ImageDownloadArgs) (*api.Image, error) {
+	ctx = workflow.WithLocalActivityOptions(ctx, workflow.LocalActivityOptions{
+		StartToCloseTimeout: 10 * time.Minute,
+		RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 3},
+	})
+
+	var res api.Image
+	err := workflow.ExecuteLocalActivity(ctx, imageDownload, fingerprint, args).Get(ctx, &res)
+	if err != nil {
+		return nil, err
+	}
+
+	return &res, nil
+}
+
+func imageDownloadClient(s *state.State, protocol string, serverCertificate string, serverURL string, sourceProjectName string) (lxd.ImageServer, error) {
+	// Attempt to resolve the alias
+	if slices.Contains([]string{"lxd", "simplestreams"}, protocol) {
+		clientArgs := &lxd.ConnectionArgs{
+			TLSServerCert: serverCertificate,
+			UserAgent:     version.UserAgent,
+			Proxy:         s.Proxy,
+			CachePath:     s.OS.CacheDir,
+			CacheExpiry:   time.Hour,
+		}
+
+		if protocol == "lxd" {
+			// Setup LXD client
+			remote, err := lxd.ConnectPublicLXD(serverURL, clientArgs)
+			if err != nil {
+				return nil, fmt.Errorf("Failed to connect to LXD server %q: %w", serverURL, err)
+			}
+
+			server, ok := remote.(lxd.InstanceServer)
+			if ok {
+				remote = server.UseProject(sourceProjectName)
+			}
+
+			return remote, nil
+		} else {
+			// Setup simplestreams client
+			remote, err := lxd.ConnectSimpleStreams(serverURL, clientArgs)
+			if err != nil {
+				return nil, fmt.Errorf("Failed to connect to simple streams server %q: %w", serverURL, err)
+			}
+
+			return remote, nil
+		}
+	}
+
+	return nil, errors.New("Invalid image protocol")
+}
+
+func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation, args ImageDownloadArgs) (*api.Image, error) {
+	var err error
+
+	// Default protocol is LXD.
+	if args.Protocol == "" {
+		args.Protocol = "lxd"
+	}
+
+	fingerprint := args.Alias
+
+	remote, err := imageDownloadClient(s, args.Protocol, args.Certificate, args.Server, args.SourceProjectName)
+	if err != nil {
+		return nil, err
+	}
+
+	// Attempt to resolve the alias
+	// For public images, handle aliases and initial metadata
+	if args.Secret == "" {
+		// Look for a matching alias
+		entry, _, err := remote.GetImageAliasType(args.Type, args.Alias)
+		if err == nil {
+			fingerprint = entry.Target // tomp do we need to expand partial fingerprint if resolved alias?
+		}
+
+		// Expand partial fingerprints
+		imgInfo, _, err := remote.GetImage(fingerprint)
+		if err != nil {
+			return nil, fmt.Errorf("Failed getting remote image info: %w", err)
+		}
+
+		fingerprint = imgInfo.Fingerprint
+	}
+
+	id := "image-download-" + fingerprint
+	logger.Error("tomp running workflow", logger.Ctx{"id": id, "member": s.ServerName})
+	run, err := s.TemporalClient.ExecuteWorkflow(context.Background(), temporalClient.StartWorkflowOptions{
+		ID:                                       id,
+		TaskQueue:                                lxdTemporal.LXDTaskQueue + s.ServerName,
+		WorkflowIDReusePolicy:                    temporalEnums.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE,
+		WorkflowIDConflictPolicy:                 temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_FAIL,
+		WorkflowExecutionErrorWhenAlreadyStarted: true,
+	}, ImageDownloadWorkflow, fingerprint, args)
+	logger.Error("tomp waiting for workflow result", logger.Ctx{"id": id, "member": s.ServerName, "err": err})
+
+	if err != nil {
+		return nil, fmt.Errorf("Workflow failed to complete: %w", err)
+	}
+
+	var result api.Image
+	err = run.Get(context.Background(), &result)
+	logger.Error("tomp got workflow result", logger.Ctx{"id": id, "member": s.ServerName, "err": err, "res": result})
+
+	if err != nil {
+		return nil, fmt.Errorf("Failed to get workflow result: %w", err)
+	}
+
+	return &result, nil
+
+}
+
 // ImageDownload resolves the image fingerprint and if not in the database, downloads it.
-func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation, args *ImageDownloadArgs) (*api.Image, error) {
-	l := logger.AddContext(logger.Ctx{"image": args.Alias, "member": s.ServerName, "project": args.ProjectName, "pool": args.StoragePool, "source": args.Server})
+func imageDownload(ctx context.Context, fp string, args ImageDownloadArgs) (*api.Image, error) {
+	s := lxdTemporal.StateFunc()
+
+	l := logger.AddContext(logger.Ctx{"image": args.Alias, "fingerprint": fp, "member": s.ServerName, "project": args.ProjectName, "pool": args.StoragePool, "source": args.Server})
+
+	l.Warn("Image download starting")
+
+	time.Sleep(time.Minute)
 
 	var err error
 	var remote lxd.ImageServer
@@ -78,54 +200,9 @@ func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation
 	// Copy so that local modifications aren't propagated to args.
 	alias := args.Alias
 
-	// Default the fingerprint to the alias string we received
-	fp := alias
-
-	// Attempt to resolve the alias
-	if slices.Contains([]string{"lxd", "simplestreams"}, protocol) {
-		clientArgs := &lxd.ConnectionArgs{
-			TLSServerCert: args.Certificate,
-			UserAgent:     version.UserAgent,
-			Proxy:         s.Proxy,
-			CachePath:     s.OS.CacheDir,
-			CacheExpiry:   time.Hour,
-		}
-
-		if protocol == "lxd" {
-			// Setup LXD client
-			remote, err = lxd.ConnectPublicLXD(args.Server, clientArgs)
-			if err != nil {
-				return nil, fmt.Errorf("Failed to connect to LXD server %q: %w", args.Server, err)
-			}
-
-			server, ok := remote.(lxd.InstanceServer)
-			if ok {
-				remote = server.UseProject(args.SourceProjectName)
-			}
-		} else {
-			// Setup simplestreams client
-			remote, err = lxd.ConnectSimpleStreams(args.Server, clientArgs)
-			if err != nil {
-				return nil, fmt.Errorf("Failed to connect to simple streams server %q: %w", args.Server, err)
-			}
-		}
-
-		// For public images, handle aliases and initial metadata
-		if args.Secret == "" {
-			// Look for a matching alias
-			entry, _, err := remote.GetImageAliasType(args.Type, fp)
-			if err == nil {
-				fp = entry.Target
-			}
-
-			// Expand partial fingerprints
-			info, _, err = remote.GetImage(fp)
-			if err != nil {
-				return nil, fmt.Errorf("Failed getting remote image info: %w", err)
-			}
-
-			fp = info.Fingerprint
-		}
+	remote, err = imageDownloadClient(s, args.Protocol, args.Certificate, args.Server, args.SourceProjectName)
+	if err != nil {
+		return nil, err
 	}
 
 	// Ensure we are the only ones operating on this image.
@@ -196,7 +273,7 @@ func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation
 				return nil, fmt.Errorf("Failed adding transferred image %q to local cluster member: %w", imgInfo.Fingerprint, err)
 			}
 		}
-	} else if response.IsNotFoundError(err) {
+	} else if api.StatusErrorCheck(err, http.StatusNotFound) {
 		err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
 			// Check if the image already exists in some other project.
 			_, imgInfo, err = tx.GetImageFromAnyProject(ctx, fp)
@@ -332,9 +409,9 @@ func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation
 	}
 
 	// Begin downloading
-	if op != nil {
+	/*if op != nil {
 		l = l.AddContext(logger.Ctx{"trigger": op.URL(), "operation": op.ID()})
-	}
+	}*/
 
 	l.Info("Downloading image")
 
@@ -352,7 +429,7 @@ func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation
 	defer cleanup()
 
 	// Setup a progress handler
-	progress := func(progress ioprogress.ProgressData) {
+	/*progress := func(progress ioprogress.ProgressData) {
 		if op == nil {
 			return
 		}
@@ -366,13 +443,14 @@ func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation
 			meta["download_progress"] = progress.Text
 			_ = op.UpdateMetadata(meta)
 		}
-	}
+	}*/
 
 	var canceler *cancel.HTTPRequestCanceller
-	if op != nil {
-		canceler = cancel.NewHTTPRequestCanceller()
+	canceler = cancel.NewHTTPRequestCanceller()
+
+	/*if op != nil {
 		op.SetCanceler(canceler)
-	}
+	}*/
 
 	switch protocol {
 	case "lxd", "simplestreams":
@@ -422,10 +500,10 @@ func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation
 		// Download the image
 		var resp *lxd.ImageFileResponse
 		request := lxd.ImageFileRequest{
-			MetaFile:        io.WriteSeeker(dest),
-			RootfsFile:      io.WriteSeeker(destRootfs),
-			ProgressHandler: progress,
-			Canceler:        canceler,
+			MetaFile:   io.WriteSeeker(dest),
+			RootfsFile: io.WriteSeeker(destRootfs),
+			//ProgressHandler: progress,
+			Canceler: canceler,
 			DeltaSourceRetriever: func(fingerprint string, file string) string {
 				path := filepath.Join(destDir, fingerprint+"."+file)
 				if shared.PathExists(path) {
@@ -512,7 +590,7 @@ func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation
 		}
 
 		// Progress handler
-		body := &ioprogress.ProgressReader{
+		/*body := &ioprogress.ProgressReader{
 			ReadCloser: raw.Body,
 			Tracker: &ioprogress.ProgressTracker{
 				Length: raw.ContentLength,
@@ -520,7 +598,7 @@ func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation
 					progress(ioprogress.ProgressData{Text: fmt.Sprintf("%d%% (%s/s)", percent, units.GetByteSizeString(speed, 2))})
 				},
 			},
-		}
+		}*/
 
 		// Create the target files
 		f, err := os.Create(destName)
@@ -535,7 +613,7 @@ func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation
 
 		// Download the image
 		writer := shared.NewQuotaWriter(io.MultiWriter(f, sha256), args.Budget)
-		size, err := io.Copy(writer, body)
+		size, err := io.Copy(writer, raw.Body)
 		if err != nil {
 			return nil, err
 		}
@@ -643,11 +721,11 @@ func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation
 	l.Info("Image downloaded")
 
 	var lifecycleRequestor *api.EventLifecycleRequestor
-	if op != nil {
-		lifecycleRequestor = op.EventLifecycleRequestor()
-	} else {
-		lifecycleRequestor = request.CreateRequestor(ctx)
-	}
+	//if op != nil {
+	//		lifecycleRequestor = op.EventLifecycleRequestor()
+	//	} else {
+	lifecycleRequestor = request.CreateRequestor(ctx)
+	//	}
 
 	s.Events.SendLifecycle(args.ProjectName, lifecycle.ImageCreated.Event(info.Fingerprint, args.ProjectName, lifecycleRequestor, logger.Ctx{"type": info.Type}))
 
