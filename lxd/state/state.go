@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"time"
 
+	"go.temporal.io/sdk/client"
+
 	"github.com/canonical/lxd/lxd/auth"
 	"github.com/canonical/lxd/lxd/bgp"
 	clusterConfig "github.com/canonical/lxd/lxd/cluster/config"
@@ -116,6 +118,8 @@ type State struct {
 
 	// CoreAuthSecrets returns the current secrets.
 	CoreAuthSecrets func(ctx context.Context) (cluster.AuthSecrets, error)
+
+	TemporalClient client.Client
 }
 
 // LeaderInfo represents information regarding cluster member leadership.
