@@ -105,12 +105,12 @@ func createFromImage(ctx context.Context, s *state.State, p api.Project, profile
 		}
 
 		if req.Source.Server != "" {
-			img, err = ensureDownloadedImageFitWithinBudget(ctx, s, op, p, imgAlias, req.Source, string(req.Type))
+			img, err = ensureDownloadedImageFitWithinBudget(context.TODO(), s, op, p, imgAlias, req.Source, string(req.Type))
 			if err != nil {
 				return err
 			}
 		} else if img != nil {
-			err := ensureImageIsLocallyAvailable(ctx, s, img, args.Project)
+			err := ensureImageIsLocallyAvailable(context.TODO(), s, img, args.Project)
 			if err != nil {
 				return err
 			}
