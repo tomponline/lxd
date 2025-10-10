@@ -153,11 +153,11 @@ func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation
 	id := "image-download-" + fingerprint
 	logger.Error("tomp running workflow", logger.Ctx{"id": id, "member": s.ServerName})
 	run, err := s.TemporalClient.ExecuteWorkflow(context.Background(), temporalClient.StartWorkflowOptions{
-		ID:                                       id,
-		TaskQueue:                                lxdTemporal.LXDTaskQueue + s.ServerName,
-		WorkflowIDReusePolicy:                    temporalEnums.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE,
-		WorkflowIDConflictPolicy:                 temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_FAIL,
-		WorkflowExecutionErrorWhenAlreadyStarted: true,
+		ID:                       id,
+		TaskQueue:                lxdTemporal.LXDTaskQueue + s.ServerName,
+		WorkflowIDReusePolicy:    temporalEnums.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE,
+		WorkflowIDConflictPolicy: temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_FAIL,
+		WorkflowTaskTimeout:      time.Minute * 2,
 	}, ImageDownloadWorkflow, fingerprint, args)
 	logger.Error("tomp waiting for workflow result", logger.Ctx{"id": id, "member": s.ServerName, "err": err})
 
