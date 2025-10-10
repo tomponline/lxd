@@ -4987,8 +4987,8 @@ func imageSyncBetweenNodes(ctx context.Context, s *state.State, r *http.Request,
 	syncNodeAddress := syncNodeAddresses[rand.Intn(len(syncNodeAddresses))]
 
 	reqContext := context.Background()
-	if r != nil {
-		reqContext = r.Context()
+	if ctx != nil {
+		reqContext = ctx
 	}
 
 	source, err := cluster.Connect(reqContext, syncNodeAddress, s.Endpoints.NetworkCert(), s.ServerCert(), true)
