@@ -34,6 +34,7 @@ import (
 	"github.com/canonical/lxd/shared/cancel"
 	"github.com/canonical/lxd/shared/logger"
 	"github.com/canonical/lxd/shared/version"
+	"github.com/google/uuid"
 )
 
 // ImageDownloadArgs used with ImageDownload.
@@ -65,13 +66,30 @@ func imageOperationLock(fingerprint string) (locking.UnlockFunc, error) {
 }
 
 func ImageDownloadWorkflow(ctx workflow.Context, fingerprint string, args ImageDownloadArgs) (*api.Image, error) {
+	currentWorkflowID := workflow.GetInfo(ctx).WorkflowExecution.ID
+
+	logger.Error("tomp started workflow", logger.Ctx{"id": currentWorkflowID, "member": lxdTemporal.StateFunc().ServerName})
+	resourceID := "image-" + fingerprint
+
+	mutex := lxdTemporal.NewMutex(currentWorkflowID, "default")
+	unlockFunc, err := mutex.Lock(ctx, resourceID, 10*time.Minute)
+	if err != nil {
+		return nil, err
+	}
+
+	logger.Error("resource locked")
+	defer func() {
+		logger.Error("resource unlocked")
+		_ = unlockFunc()
+	}()
+
 	ctx = workflow.WithLocalActivityOptions(ctx, workflow.LocalActivityOptions{
-		StartToCloseTimeout: 10 * time.Minute,
+		StartToCloseTimeout: time.Minute,
 		RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 3},
 	})
 
 	var res api.Image
-	err := workflow.ExecuteLocalActivity(ctx, imageDownload, fingerprint, args).Get(ctx, &res)
+	err = workflow.ExecuteLocalActivity(ctx, imageDownload, fingerprint, args).Get(ctx, &res)
 	if err != nil {
 		return nil, err
 	}
@@ -150,8 +168,8 @@ func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation
 		fingerprint = imgInfo.Fingerprint
 	}
 
-	id := "image-download-" + fingerprint
-	logger.Error("tomp running workflow", logger.Ctx{"id": id, "member": s.ServerName})
+	id := "image-download-" + uuid.New().String()
+	logger.Error("tomp schedule workflow", logger.Ctx{"id": id, "member": s.ServerName})
 	run, err := s.TemporalClient.ExecuteWorkflow(context.Background(), temporalClient.StartWorkflowOptions{
 		ID:                       id,
 		TaskQueue:                lxdTemporal.LXDTaskQueue + s.ServerName,
@@ -159,13 +177,13 @@ func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation
 		WorkflowIDConflictPolicy: temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_FAIL,
 		WorkflowTaskTimeout:      time.Minute * 2,
 	}, ImageDownloadWorkflow, fingerprint, args)
-	logger.Error("tomp waiting for workflow result", logger.Ctx{"id": id, "member": s.ServerName, "err": err})
 
 	if err != nil {
-		return nil, fmt.Errorf("Workflow failed to complete: %w", err)
+		return nil, fmt.Errorf("Workflow failed to start: %w", err)
 	}
 
 	var result api.Image
+	logger.Error("tomp waiting for workflow result", logger.Ctx{"id": id, "member": s.ServerName, "err": err})
 	err = run.Get(context.Background(), &result)
 	logger.Error("tomp got workflow result", logger.Ctx{"id": id, "member": s.ServerName, "err": err, "res": result})
 
@@ -184,8 +202,9 @@ func imageDownload(ctx context.Context, fp string, args ImageDownloadArgs) (*api
 	l := logger.AddContext(logger.Ctx{"image": args.Alias, "fingerprint": fp, "member": s.ServerName, "project": args.ProjectName, "pool": args.StoragePool, "source": args.Server})
 
 	l.Warn("Image download starting")
+	defer l.Warn("Image download done")
 
-	time.Sleep(time.Minute)
+	time.Sleep(time.Second * 10)
 
 	var err error
 	var remote lxd.ImageServer

@@ -2683,6 +2683,28 @@ func (d *Daemon) temporalPerNodeWorker(ctx context.Context) error {
 	return nil
 }
 
+func (d *Daemon) temporalMutexWorker(ctx context.Context) error {
+	logger.Warn("Starting Temporal Mutex worker")
+
+	w := temporalWorker.New(d.temporalClient, temporal.MutexTaskQueue, temporalWorker.Options{})
+	w.RegisterActivity(temporal.SignalWithStartMutexWorkflowActivity)
+	w.RegisterWorkflow(temporal.MutexWorkflow)
+	w.RegisterWorkflow(temporal.SampleWorkflowWithMutex)
+
+	if err := w.Start(); err != nil {
+		return fmt.Errorf("Failed to start mutex worker: %w", err)
+	}
+	defer w.Stop()
+
+	logger.Warn("Temporal mutex worker started")
+
+	// Wait for a signal to exit
+	<-ctx.Done()
+	logger.Warn("Stopping Temporal mutex worker as context was canceled...")
+
+	return nil
+}
+
 func (d *Daemon) temporalInit(ctx context.Context, db *db.DB) {
 	nodeId := int(db.Cluster.GetNodeID())
 	ip, _, _ := strings.Cut(d.localConfig.HTTPSAddress(), ":")
@@ -2766,6 +2788,19 @@ func (d *Daemon) temporalInit(ctx context.Context, db *db.DB) {
 			err := d.temporalPerNodeWorker(ctx)
 			if err != nil {
 				logger.Error("Temporal per node worker failed", logger.Ctx{"err": err})
+				time.Sleep(time.Second)
+			} else {
+				return
+			}
+		}
+	}()
+
+	go func() {
+		<-temporal.ServerReady.Done()
+		for {
+			err := d.temporalMutexWorker(ctx)
+			if err != nil {
+				logger.Error("Temporal mutex worker failed", logger.Ctx{"err": err})
 				time.Sleep(time.Second)
 			} else {
 				return

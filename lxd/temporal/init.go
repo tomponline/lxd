@@ -8,8 +8,9 @@ import (
 )
 
 const (
-	sqlDbName    = "db"
-	LXDTaskQueue = "LXD_TASK_QUEUE"
+	sqlDbName      = "db"
+	LXDTaskQueue   = "LXD_TASK_QUEUE"
+	MutexTaskQueue = "mutex"
 )
 
 var StateFunc func() *state.State
