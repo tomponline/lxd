@@ -168,29 +168,3 @@ func SignalWithStartMutexWorkflowActivity(
 func generateUnlockChannelName(senderWorkflowID string) string {
 	return fmt.Sprintf("unlock-event-%s", senderWorkflowID)
 }
-
-func SampleWorkflowWithMutex(
-	ctx workflow.Context,
-	resourceID string,
-) error {
-	currentWorkflowID := workflow.GetInfo(ctx).WorkflowExecution.ID
-	logger := workflow.GetLogger(ctx)
-	logger.Info("started", "currentWorkflowID", currentWorkflowID, "resourceID", resourceID)
-
-	mutex := NewMutex(currentWorkflowID, "TestUseCase")
-	unlockFunc, err := mutex.Lock(ctx, resourceID, 10*time.Minute)
-	if err != nil {
-		return err
-	}
-	logger.Info("resource locked")
-
-	// emulate long running process
-	logger.Info("critical operation started")
-	_ = workflow.Sleep(ctx, 10*time.Second)
-	logger.Info("critical operation finished")
-
-	_ = unlockFunc()
-
-	logger.Info("finished")
-	return nil
-}

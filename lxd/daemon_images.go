@@ -68,7 +68,7 @@ func imageOperationLock(fingerprint string) (locking.UnlockFunc, error) {
 func ImageDownloadWorkflow(ctx workflow.Context, fingerprint string, args ImageDownloadArgs) (*api.Image, error) {
 	currentWorkflowID := workflow.GetInfo(ctx).WorkflowExecution.ID
 
-	logger.Error("tomp started workflow", logger.Ctx{"id": currentWorkflowID, "member": lxdTemporal.StateFunc().ServerName})
+	logger.Info("tomp started workflow", logger.Ctx{"id": currentWorkflowID, "member": lxdTemporal.StateFunc().ServerName})
 	resourceID := "image-" + fingerprint
 
 	mutex := lxdTemporal.NewMutex(currentWorkflowID, "default")
@@ -77,9 +77,7 @@ func ImageDownloadWorkflow(ctx workflow.Context, fingerprint string, args ImageD
 		return nil, err
 	}
 
-	logger.Error("resource locked")
 	defer func() {
-		logger.Error("resource unlocked")
 		_ = unlockFunc()
 	}()
 
@@ -169,7 +167,7 @@ func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation
 	}
 
 	id := "image-download-" + uuid.New().String()
-	logger.Error("tomp schedule workflow", logger.Ctx{"id": id, "member": s.ServerName})
+	logger.Info("tomp schedule workflow", logger.Ctx{"id": id, "member": s.ServerName})
 	run, err := s.TemporalClient.ExecuteWorkflow(context.Background(), temporalClient.StartWorkflowOptions{
 		ID:                       id,
 		TaskQueue:                lxdTemporal.LXDTaskQueue + s.ServerName,
@@ -183,9 +181,9 @@ func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation
 	}
 
 	var result api.Image
-	logger.Error("tomp waiting for workflow result", logger.Ctx{"id": id, "member": s.ServerName, "err": err})
+	logger.Info("tomp waiting for workflow result", logger.Ctx{"id": id, "member": s.ServerName, "err": err})
 	err = run.Get(context.Background(), &result)
-	logger.Error("tomp got workflow result", logger.Ctx{"id": id, "member": s.ServerName, "err": err, "res": result})
+	logger.Info("tomp got workflow result", logger.Ctx{"id": id, "member": s.ServerName, "err": err, "res": result})
 
 	if err != nil {
 		return nil, fmt.Errorf("Failed to get workflow result: %w", err)
@@ -201,10 +199,10 @@ func imageDownload(ctx context.Context, fp string, args ImageDownloadArgs) (*api
 
 	l := logger.AddContext(logger.Ctx{"image": args.Alias, "fingerprint": fp, "member": s.ServerName, "project": args.ProjectName, "pool": args.StoragePool, "source": args.Server})
 
-	l.Warn("Image download starting")
-	defer l.Warn("Image download done")
+	l.Info("Image download starting")
+	defer l.Info("Image download done")
 
-	time.Sleep(time.Second * 10)
+	// time.Sleep(time.Second * 10)
 
 	var err error
 	var remote lxd.ImageServer

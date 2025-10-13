@@ -2689,7 +2689,6 @@ func (d *Daemon) temporalMutexWorker(ctx context.Context) error {
 	w := temporalWorker.New(d.temporalClient, temporal.MutexTaskQueue, temporalWorker.Options{})
 	w.RegisterActivity(temporal.SignalWithStartMutexWorkflowActivity)
 	w.RegisterWorkflow(temporal.MutexWorkflow)
-	w.RegisterWorkflow(temporal.SampleWorkflowWithMutex)
 
 	if err := w.Start(); err != nil {
 		return fmt.Errorf("Failed to start mutex worker: %w", err)
