@@ -2464,7 +2464,7 @@ func (d *qemu) deviceAttachBlockDevice(mount deviceConfig.MountEntryItem) error 
 
 	err = monHook(monitor)
 	if err != nil {
-		return fmt.Errorf("Failed to call monitor hook for block device: %w", err)
+		return fmt.Errorf("Failed setting up device via monitor: %w", err)
 	}
 
 	return nil
@@ -2581,7 +2581,7 @@ func (d *qemu) deviceAttachNIC(netIF []deviceConfig.RunConfigItem) error {
 
 	err = monHook(monitor)
 	if err != nil {
-		return err
+		return fmt.Errorf("Failed setting up device via monitor: %w", err)
 	}
 
 	return nil
