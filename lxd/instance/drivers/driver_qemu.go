@@ -2362,9 +2362,6 @@ func (d *qemu) deviceAttachPath(deviceName string) (mountTag string, err error) 
 		return "", errors.New("Virtiofsd isn't running")
 	}
 
-	reverter := revert.New()
-	defer reverter.Fail()
-
 	// Check if the agent is running.
 	monitor, err := qmp.Connect(d.monitorPath(), qemuSerialChardevName, d.getMonitorEventHandler())
 	if err != nil {
@@ -2396,6 +2393,9 @@ func (d *qemu) deviceAttachPath(deviceName string) (mountTag string, err error) 
 		return "", fmt.Errorf("Error opening virtiofs socket %q: %w", virtiofsdSockPath, err)
 	}
 
+	reverter := revert.New()
+	defer reverter.Fail()
+
 	err = monitor.SendFile(virtiofsdSockPath, virtiofsFile)
 	if err != nil {
 		return "", fmt.Errorf("Failed to send virtiofs file descriptor: %w", err)
@@ -2425,10 +2425,12 @@ func (d *qemu) deviceAttachPath(deviceName string) (mountTag string, err error) 
 	reverter.Add(func() { _ = monitor.RemoveCharDevice(deviceID) })
 
 	// Try to get a PCI address for hotplugging.
-	busName, busAddr, _, err := d.busAllocatePCIeHotplug(deviceName, false)
+	busCleanup, busName, busAddr, _, err := d.busAllocatePCIeHotplug(deviceName, false)
 	if err != nil {
 		return "", err
 	}
+
+	reverter.Add(busCleanup)
 
 	qemuDev := map[string]any{
 		"driver":  "vhost-user-fs-pci",
