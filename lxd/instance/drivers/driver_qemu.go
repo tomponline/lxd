@@ -4369,6 +4369,7 @@ func (d *qemu) addDriveConfig(busAllocate busAllocator, bootIndexes map[string]i
 		qemuDev["serial"] = qemuDeviceSerial[:36]
 	}
 
+	var busCleanup revert.Hook
 	if busName == "virtio-scsi" {
 		qemuDev["device_id"] = qemuDeviceSerial
 		qemuDev["channel"] = 0
@@ -4385,7 +4386,10 @@ func (d *qemu) addDriveConfig(busAllocate busAllocator, bootIndexes map[string]i
 		qemuDev["driver"] = busName
 
 		// Allocate a device port.
-		devBus, devAddr, multi, err := busAllocate(driveConf.DevName, false)
+		var devBus, devAddr string
+		var multi bool
+		var err error
+		busCleanup, devBus, devAddr, multi, err = busAllocate(driveConf.DevName, false)
 		if err != nil {
 			return nil, fmt.Errorf("Failed allocating bus for disk device %q: %w", driveConf.DevName, err)
 		}
@@ -4401,8 +4405,12 @@ func (d *qemu) addDriveConfig(busAllocate busAllocator, bootIndexes map[string]i
 	}
 
 	monHook := func(m *qmp.Monitor) error {
-		revert := revert.New()
-		defer revert.Fail()
+		reverter := revert.New()
+		defer reverter.Fail()
+
+		if busCleanup != nil {
+			reverter.Add(busCleanup)
+		}
 
 		nodeName := qemuDeviceNameOrID(qemuDeviceNamePrefix, driveConf.DevName, "", qemuDeviceNameMaxLength)
 
@@ -4441,7 +4449,7 @@ func (d *qemu) addDriveConfig(busAllocate busAllocator, bootIndexes map[string]i
 				return fmt.Errorf("Failed sending file descriptor of %q for disk device %q: %w", f.Name(), driveConf.DevName, err)
 			}
 
-			revert.Add(func() {
+			reverter.Add(func() {
 				_ = m.RemoveFDFromFDSet(nodeName)
 			})
 
@@ -4465,7 +4473,7 @@ func (d *qemu) addDriveConfig(busAllocate busAllocator, bootIndexes map[string]i
 			}
 		}
 
-		revert.Success()
+		reverter.Success()
 		return nil
 	}
 
