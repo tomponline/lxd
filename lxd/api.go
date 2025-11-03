@@ -101,6 +101,7 @@ func restServer(d *Daemon) *http.Server {
 		mux.PathPrefix("/ui/").Handler(uiHandlerWithSecurity)
 		mux.HandleFunc("/ui", func(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, "/ui/", http.StatusMovedPermanently)
+			return
 		})
 	} else {
 		uiHandlerErrorUINotEnabled := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -136,6 +137,7 @@ func restServer(d *Daemon) *http.Server {
 		mux.PathPrefix("/documentation/").Handler(documentationHandlerWithSecurity)
 		mux.HandleFunc("/documentation", func(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, "/documentation/", http.StatusMovedPermanently)
+			return
 		})
 	}
 
@@ -220,8 +222,17 @@ func restServer(d *Daemon) *http.Server {
 	// Initialize API metrics with zero values.
 	metrics.InitAPIMetrics()
 
+	// Create CrossOriginProtection and wrap the top-level handler. This
+	// centralizes CSRF/cross-origin protections using the stdlib implementation
+	// (Go 1.25+).
+	cp := newCrossOriginProtection(d.State().GlobalConfig)
+
+	// Wrap the mux with our lxdHTTPServer which performs CORS header setting
+	// and other pre-processing. Then wrap that with CrossOriginProtection.
+	wrapped := &lxdHTTPServer{r: mux, d: d}
+
 	return &http.Server{
-		Handler:     &lxdHTTPServer{r: mux, d: d},
+		Handler:     cp.Handler(wrapped),
 		ConnContext: request.SaveConnectionInContext,
 	}
 }
@@ -278,198 +289,4 @@ func storageBucketsServer(d *Daemon) *http.Server {
 			// Lookup access key to ascertain if it maps to a bucket.
 			var err error
 			var bucket *db.StorageBucket
-			err = s.DB.Cluster.Transaction(r.Context(), func(ctx context.Context, tx *db.ClusterTx) error {
-				bucket, err = tx.GetStoragePoolLocalBucketByAccessKey(ctx, accessKey)
-				return err
-			})
-			if err != nil {
-				if api.StatusErrorCheck(err, http.StatusNotFound) {
-					errResult := s3.Error{Code: s3.ErrorCodeInvalidAccessKeyID}
-					errResult.Response(w)
 
-					return
-				}
-
-				errResult := s3.Error{Code: s3.ErrorCodeInternalError, Message: err.Error()}
-				errResult.Response(w)
-
-				return
-			}
-
-			pool, err := storagePools.LoadByName(s, bucket.PoolName)
-			if err != nil {
-				errResult := s3.Error{Code: s3.ErrorCodeInternalError, Message: err.Error()}
-				errResult.Response(w)
-
-				return
-			}
-
-			minioProc, err := pool.ActivateBucket(bucket.Project, bucket.Name, nil)
-			if err != nil {
-				errResult := s3.Error{Code: s3.ErrorCodeInternalError, Message: err.Error()}
-				errResult.Response(w)
-
-				return
-			}
-
-			u := minioProc.URL()
-
-			rproxy := httputil.NewSingleHostReverseProxy(&u)
-			rproxy.ServeHTTP(w, r)
-
-			return
-		}
-
-		// Otherwise treat request as anonymous.
-		listResult := s3.ListAllMyBucketsResult{Owner: s3.Owner{ID: "anonymous"}}
-		listResult.Response(w)
-	})
-
-	// We use the NotFoundHandler to reverse proxy requests to dynamically started local MinIO processes.
-	m.NotFoundHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Wait until daemon is fully started.
-		<-d.waitReady.Done()
-
-		s := d.State()
-
-		reqURL, err := url.Parse(r.RequestURI)
-		if err != nil {
-			errResult := s3.Error{Code: s3.ErrorInvalidRequest, Message: err.Error()}
-			errResult.Response(w)
-
-			return
-		}
-
-		pathParts := strings.Split(reqURL.Path, "/")
-		if len(pathParts) < 2 {
-			errResult := s3.Error{Code: s3.ErrorInvalidRequest, Message: "Bucket name not specified"}
-			errResult.Response(w)
-
-			return
-		}
-
-		bucketName, err := url.PathUnescape(pathParts[1])
-		if err != nil {
-			errResult := s3.Error{Code: s3.ErrorCodeNoSuchBucket, BucketName: pathParts[1]}
-			errResult.Response(w)
-
-			return
-		}
-
-		// Lookup bucket.
-		var bucket *db.StorageBucket
-		err = s.DB.Cluster.Transaction(r.Context(), func(ctx context.Context, tx *db.ClusterTx) error {
-			bucket, err = tx.GetStoragePoolLocalBucket(ctx, bucketName)
-			return err
-		})
-		if err != nil {
-			if api.StatusErrorCheck(err, http.StatusNotFound) {
-				errResult := s3.Error{Code: s3.ErrorCodeNoSuchBucket, BucketName: bucketName}
-				errResult.Response(w)
-
-				return
-			}
-
-			errResult := s3.Error{Code: s3.ErrorCodeInternalError, Message: err.Error(), BucketName: bucketName}
-			errResult.Response(w)
-
-			return
-		}
-
-		pool, err := storagePools.LoadByName(s, bucket.PoolName)
-		if err != nil {
-			errResult := s3.Error{Code: s3.ErrorCodeInternalError, Message: err.Error()}
-			errResult.Response(w)
-
-			return
-		}
-
-		minioProc, err := pool.ActivateBucket(bucket.Project, bucket.Name, nil)
-		if err != nil {
-			errResult := s3.Error{Code: s3.ErrorCodeInternalError, Message: err.Error()}
-			errResult.Response(w)
-
-			return
-		}
-
-		u := minioProc.URL()
-
-		rproxy := httputil.NewSingleHostReverseProxy(&u)
-		rproxy.ServeHTTP(w, r)
-	})
-
-	return &http.Server{Handler: &lxdHTTPServer{r: m, d: d}}
-}
-
-type lxdHTTPServer struct {
-	r *mux.Router
-	d *Daemon
-}
-
-func (s *lxdHTTPServer) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
-	if !strings.HasPrefix(req.URL.Path, "/internal") {
-		<-s.d.setupChan
-
-		// Set CORS headers, unless this is an internal request.
-		setCORSHeaders(rw, req, s.d.State().GlobalConfig)
-	}
-
-	// OPTIONS request don't need any further processing
-	if req.Method == "OPTIONS" {
-		return
-	}
-
-	// Call the original server
-	s.r.ServeHTTP(rw, req)
-}
-
-func setCORSHeaders(rw http.ResponseWriter, req *http.Request, config *clusterConfig.Config) {
-	allowedOrigin := config.HTTPSAllowedOrigin()
-	origin := req.Header.Get("Origin")
-	if allowedOrigin != "" && origin != "" {
-		rw.Header().Set("Access-Control-Allow-Origin", allowedOrigin)
-	}
-
-	allowedMethods := config.HTTPSAllowedMethods()
-	if allowedMethods != "" && origin != "" {
-		rw.Header().Set("Access-Control-Allow-Methods", allowedMethods)
-	}
-
-	allowedHeaders := config.HTTPSAllowedHeaders()
-	if allowedHeaders != "" && origin != "" {
-		rw.Header().Set("Access-Control-Allow-Headers", allowedHeaders)
-	}
-
-	allowedCredentials := config.HTTPSAllowedCredentials()
-	if allowedCredentials {
-		rw.Header().Set("Access-Control-Allow-Credentials", "true")
-	}
-}
-
-type uiHTTPDir struct {
-	http.FileSystem
-}
-
-// Open opens the HTTP server for the user interface files.
-func (fs uiHTTPDir) Open(name string) (http.File, error) {
-	fsFile, err := fs.FileSystem.Open(name)
-	if err != nil && os.IsNotExist(err) {
-		return fs.FileSystem.Open("index.html")
-	}
-
-	return fsFile, err
-}
-
-type documentationHTTPDir struct {
-	http.FileSystem
-}
-
-// Open opens the HTTP server for the documentation files.
-func (fs documentationHTTPDir) Open(name string) (http.File, error) {
-	fsFile, err := fs.FileSystem.Open(name)
-	if err != nil && os.IsNotExist(err) {
-		return fs.FileSystem.Open("index.html")
-	}
-
-	return fsFile, err
-}
