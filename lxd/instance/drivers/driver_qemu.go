@@ -4011,7 +4011,6 @@ func (d *qemu) addRootDriveConfig(busAllocate busAllocator, mountInfo *storagePo
 // addDriveDirConfig adds the qemu config required for adding a supplementary drive directory share.
 func (d *qemu) addDriveDirConfig(cfg *[]cfgSection, busName string, busAllocate busAllocator, fdFiles *[]*os.File, driveConf deviceConfig.MountEntryItem) error {
 	mountTag := qemuDeviceNameOrID(qemuDeviceNamePrefix, driveConf.DevName, "", qemuDeviceNameMaxLength)
-	readonly := slices.Contains(driveConf.Opts, "ro")
 
 	// Check if the disk device has provided a virtiofsd socket path.
 	var virtiofsdSockPath string
@@ -4066,42 +4065,6 @@ func (d *qemu) addDriveDirConfig(cfg *[]cfgSection, busName string, busAllocate 
 		driveDirVirtioOpts.dev.busName = busName
 		*cfg = append(*cfg, qemuDriveDir(&driveDirVirtioOpts)...)
 	}
-
-	// Add 9p share config.
-	fdSource, ok := driveConf.DevSource.(deviceConfig.DevSourceFD)
-	if !ok {
-		return fmt.Errorf("Drive config for %q was not a file descriptor", driveConf.DevName)
-	}
-
-	proxyFD := d.addFileDescriptor(fdFiles, os.NewFile(fdSource.FD, driveConf.DevName))
-
-	driveDir9pOpts := qemuDriveDirOpts{
-		devName:  driveConf.DevName,
-		mountTag: mountTag,
-		proxyFD:  proxyFD, // Pass by file descriptor
-		readonly: readonly,
-		protocol: "9p",
-	}
-
-	if shouldBusAllocate {
-		busCleanup, devBus, devAddr, multi, err := busAllocate(driveConf.DevName, true)
-		if err != nil {
-			return fmt.Errorf("Failed allocating bus for 9p disk device %q: %w", driveConf.DevName, err)
-		}
-
-		if busCleanup != nil {
-			reverter.Add(busCleanup)
-		}
-
-		driveDir9pOpts.dev = qemuDevOpts{
-			devBus:        devBus,
-			devAddr:       devAddr,
-			multifunction: multi,
-		}
-	}
-
-	driveDir9pOpts.dev.busName = busName
-	*cfg = append(*cfg, qemuDriveDir(&driveDir9pOpts)...)
 
 	reverter.Success()
 	return nil

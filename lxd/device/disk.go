@@ -1004,13 +1004,6 @@ func (d *disk) startContainer() (*deviceConfig.RunConfig, error) {
 	return &runConf, nil
 }
 
-// vmVirtfsProxyHelperPaths returns the path for PID file to use with virtfs-proxy-helper process.
-func (d *disk) vmVirtfsProxyHelperPaths() string {
-	pidPath := filepath.Join(d.inst.DevicesPath(), filesystem.PathNameEncode(d.name)+".pid")
-
-	return pidPath
-}
-
 // vmVirtiofsdPaths returns the path for the socket and PID file to use with virtiofsd process.
 func (d *disk) vmVirtiofsdPaths() (sockPath string, pidPath string) {
 	prefix := filepath.Join(d.inst.DevicesPath(), "virtio-fs."+filesystem.PathNameEncode(d.name))
@@ -1296,8 +1289,9 @@ func (d *disk) startVM() (*deviceConfig.RunConfig, error) {
 					virtiofsdThreadPoolSize = uint16(virtiofsdThreadPoolSizeRaw)
 				}
 
-				// Start virtiofsd for virtio-fs share. The lxd-agent prefers to use this over the
-				// virtfs-proxy-helper 9p share. The 9p share will only be used as a fallback.
+				// Start virtiofsd for virtio-fs share.
+				// The lxd-agent prefers to use this over the 9p share. The 9p share will only be
+				// used as a fallback if the guest doesn't support virtio-fs.
 				err = func() error {
 					sockPath, pidPath := d.vmVirtiofsdPaths()
 					logPath := filepath.Join(d.inst.LogPath(), "disk."+filesystem.PathNameEncode(d.name)+".log")
@@ -1346,33 +1340,6 @@ func (d *disk) startVM() (*deviceConfig.RunConfig, error) {
 				}()
 				if err != nil {
 					return nil, fmt.Errorf("Failed to setup virtiofsd for device %q: %w", d.name, err)
-				}
-
-				// We can't hotplug 9p shares, so only do 9p for stopped instances.
-				if !d.inst.IsRunning() {
-					// Start virtfs-proxy-helper for 9p share (this will rewrite mount.DevPath with
-					// socket FD number so must come after starting virtiofsd).
-					err = func() error {
-						unixListener, cleanup, err := DiskVMVirtfsProxyStart(d.state.OS.ExecPath, d.vmVirtfsProxyHelperPaths(), mountedPath, rawIDMaps)
-						if err != nil {
-							return err
-						}
-
-						revert.Add(cleanup)
-
-						runConf.Revert = func() { _ = unixListener.Close() }
-
-						// Request the unix socket is closed after QEMU has connected on startup.
-						runConf.PostHooks = append(runConf.PostHooks, unixListener.Close)
-
-						// Use 9p socket FD number as dev path so qemu can connect to the proxy.
-						mount.DevSource = deviceConfig.DevSourceFD{FD: unixListener.Fd()}
-
-						return nil
-					}()
-					if err != nil {
-						return nil, fmt.Errorf("Failed to setup virtfs-proxy-helper for device %q: %w", d.name, err)
-					}
 				}
 			} else if isPath {
 				f, err := d.localSourceOpen(pathSource.Path)
@@ -2173,14 +2140,8 @@ func (d *disk) Stop() (*deviceConfig.RunConfig, error) {
 }
 
 func (d *disk) stopVM() (*deviceConfig.RunConfig, error) {
-	// Stop the virtfs-proxy-helper process and clean up.
-	err := DiskVMVirtfsProxyStop(d.vmVirtfsProxyHelperPaths())
-	if err != nil {
-		return &deviceConfig.RunConfig{}, fmt.Errorf("Failed cleaning up virtfs-proxy-helper: %w", err)
-	}
-
 	// Stop the virtiofsd process and clean up.
-	err = DiskVMVirtiofsdStop(d.vmVirtiofsdPaths())
+	err := DiskVMVirtiofsdStop(d.vmVirtiofsdPaths())
 	if err != nil {
 		return &deviceConfig.RunConfig{}, fmt.Errorf("Failed cleaning up virtiofsd: %w", err)
 	}
