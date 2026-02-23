@@ -333,6 +333,7 @@ jobs:
       - name: Setup MicroOVN
         uses: ./.github/actions/setup-microovn
         with:
+          microovn-channel: "24.03/edge"
           snap-cache-dir: ${{ env.SNAP_CACHE_DIR }}
 
       - name: Make GOCOVERDIR
