@@ -184,11 +184,9 @@ func applyHooksWithFS(hooksFilePath string, cfs containerFS) error {
 		}
 
 		// Create the symlink
-		err = cfs.Symlink(target, symlink.Link)
+		err = createSymlinkInContainer(cfs, target, symlink.Link)
 		if err != nil {
-			if !errors.Is(err, fs.ErrExist) {
-				return fmt.Errorf("Failed creating the CDI symlink: %w", err)
-			}
+			return err
 		}
 	}
 
@@ -245,6 +243,40 @@ func applyHooksWithFS(hooksFilePath string, cfs containerFS) error {
 				}
 			}
 		}
+	}
+
+	return nil
+}
+
+func createSymlinkInContainer(cfs containerFS, target string, link string) error {
+	// Create the symlink
+	err := cfs.Symlink(target, link)
+	if err != nil {
+		origErr := fmt.Errorf("Failed creating the CDI symlink %q to %q: %w", link, target, err)
+		sftpErr, isSftpStatusError := errors.AsType[*sftp.StatusError](err)
+		if isSftpStatusError && sftpErr.FxCode() == sftp.ErrSSHFxFailure { // No specific error for file exists.
+			fileInfo, err := cfs.Lstat(link)
+			if err != nil {
+				return fmt.Errorf("Failed getting file info for CDI symlink path %q: %w", link, err)
+			}
+
+			// Try removing the existing symlink in case it caused the error.
+			if fileInfo.Mode()&os.ModeSymlink == os.ModeSymlink {
+				err = cfs.Remove(link)
+				if err != nil {
+					return fmt.Errorf("Failed removing existing CDI symlink path %q: %w", link, err)
+				}
+
+				err = cfs.Symlink(target, link)
+				if err != nil {
+					return fmt.Errorf("Failed creating the CDI symlink %q to %q: %w", link, target, err)
+				}
+
+				return nil
+			}
+		}
+
+		return origErr
 	}
 
 	return nil
