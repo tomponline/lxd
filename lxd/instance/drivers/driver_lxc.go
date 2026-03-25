@@ -5751,10 +5751,10 @@ func (d *lxc) FileSFTPConn() (net.Conn, error) {
 	// to complete before continuing as it is possible that a disk device is being removed that requires SFTP
 	// to clean up the path inside the container. Also it is not possible to be shifting/replacing the root
 	// volume when the instance is running, so there should be no reason to wait for the operation to finish.
-	op := operationlock.Get(d.Project().Name, d.Name())
+	/*op := operationlock.Get(d.Project().Name, d.Name())
 	if op.Action() != operationlock.ActionUpdate || !d.IsRunning() {
 		_ = op.Wait(context.Background())
-	}
+	}*/
 
 	// Setup reverter.
 	revert := revert.New()
