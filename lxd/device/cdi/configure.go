@@ -85,16 +85,34 @@ func specMountToInstanceDev(configDevices *ConfigDevices, cdiID ID, mounts []*sp
 
 		chosenOptsStr := strings.Join(chosenOpts, ",")
 
-		// mount.HostPath can be a symbolic link, so we need to evaluate it
+		// mount.HostPath can contain a symbolic link, so we need to evaluate it to get dereferenced path.
 		evaluatedHostPath, err := filepath.EvalSymlinks(mount.HostPath)
 		if err != nil {
 			return nil, err
 		}
 
+		// If the evaluated host path is different from the original host path (if it contains a symlink)
+		// and the container path is the same as the original host path relative to rootPath,
+		// then we update the container path to be the evaluated host path relative to rootPath.
 		if evaluatedHostPath != mount.HostPath && mount.ContainerPath == strings.TrimPrefix(mount.HostPath, rootPath) {
+			// Use the dereferenced host path with the root path stripped as the target path in the container.
 			targetPath := strings.TrimPrefix(evaluatedHostPath, rootPath)
-			indirectSymlinks = append(indirectSymlinks, SymlinkEntry{Target: targetPath, Link: mount.ContainerPath})
-			mount.ContainerPath = targetPath
+
+			// If the original mount.HostPath is itself a symlink, then re-create the symlink in container.
+			fileInfo, err := os.Lstat(mount.HostPath)
+			if err != nil {
+				return nil, fmt.Errorf("Failed getting file info for mount host path %q: %w", mount.HostPath, err)
+			}
+
+			if fileInfo.Mode()&os.ModeSymlink == os.ModeSymlink {
+				indirectSymlinks = append(indirectSymlinks, SymlinkEntry{
+					Target: targetPath,
+					Link:   mount.ContainerPath,
+				})
+			}
+
+			// Make sure that the container path for the bind-mount reflects the dereferenced path.
+			mount.ContainerPath = strings.TrimPrefix(targetPath, rootPath)
 		}
 
 		configDevices.BindMounts = append(
