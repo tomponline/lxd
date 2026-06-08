@@ -3643,3 +3643,17 @@ For bearer tokens the expiry is recorded when a token is issued and cleared when
 The field is omitted for identities whose credential has no expiry, that have no credential yet (pending identities), or whose token has been revoked.
 
 Note that bearer identities created prior to this extension will have an omitted `expires_at` field until a new token is issued.
+
+## `instance_microvm`
+
+Adds a new `microvm` instance type that uses QEMU's lightweight `microvm` machine type with direct kernel boot from the host.
+
+MicroVMs use container images but unpack them into an ext4 filesystem inside a disk image file. They boot using the host's kernel and initrd, making them faster to start than full virtual machines while providing stronger isolation than containers.
+
+This extension adds the following instance configuration keys:
+
+* {config:option}`instance-microvm:microvm.kernel_path` - Path to the host kernel to use for booting.
+* {config:option}`instance-microvm:microvm.initrd_path` - Path to the host initrd to use for booting.
+* {config:option}`instance-microvm:microvm.kernel_append` - Additional kernel command line arguments.
+
+Only the `dir` storage pool driver supports MicroVM instances initially. Snapshots and migrations are not supported.

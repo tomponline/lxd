@@ -395,7 +395,7 @@ func (d *qemu) getMonitorEventHandler() func(event string, data map[string]any) 
 		}
 
 		var err error
-		var d *qemu // Redefine d as local variable inside callback to avoid keeping references around.
+		var q *qemu // The qemu struct to use for handling events.
 
 		inst := instanceRefGet(instProject.Name, instanceName)
 		if inst == nil {
@@ -414,18 +414,25 @@ func (d *qemu) getMonitorEventHandler() func(event string, data map[string]any) 
 			}
 		}
 
-		d, ok := inst.(*qemu)
-		if !ok || d == nil {
-			logger.Error("Failed casting instance to *qemu")
-			return
+		// Try casting to *qemu first (for regular VMs).
+		q, ok := inst.(*qemu)
+		if !ok || q == nil {
+			// Try casting to *microvm and use its embedded qemu struct.
+			m, ok := inst.(*microvm)
+			if !ok || m == nil {
+				logger.Error("Failed casting instance to *qemu or *microvm")
+				return
+			}
+
+			q = &m.qemu
 		}
 
 		switch event {
 		case qmp.EventAgentStarted:
-			d.logger.Debug("Instance agent started")
-			err := d.advertiseVsockAddress()
+			q.logger.Debug("Instance agent started")
+			err := q.advertiseVsockAddress()
 			if err != nil {
-				d.logger.Warn("Failed advertising vsock address to instance agent", logger.Ctx{"err": err})
+				q.logger.Warn("Failed advertising vsock address to instance agent", logger.Ctx{"err": err})
 				return
 			}
 
@@ -437,14 +444,14 @@ func (d *qemu) getMonitorEventHandler() func(event string, data map[string]any) 
 			}
 
 			if entry == qmp.EventVMShutdownReasonDisconnect {
-				d.logger.Warn("Instance stopped", logger.Ctx{"target": target, "reason": data["reason"]})
+				q.logger.Warn("Instance stopped", logger.Ctx{"target": target, "reason": data["reason"]})
 			} else {
-				d.logger.Debug("Instance stopped", logger.Ctx{"target": target, "reason": data["reason"]})
+				q.logger.Debug("Instance stopped", logger.Ctx{"target": target, "reason": data["reason"]})
 			}
 
-			err = d.onStop(context.Background(), target)
+			err = q.onStop(context.Background(), target)
 			if err != nil {
-				d.logger.Error("Failed cleanly stopping instance", logger.Ctx{"err": err})
+				q.logger.Error("Failed cleanly stopping instance", logger.Ctx{"err": err})
 				return
 			}
 		}

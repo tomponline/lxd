@@ -33,6 +33,7 @@ type cmdInit struct {
 	flagNoProfiles    bool
 	flagEmpty         bool
 	flagVM            bool
+	flagMicroVM       bool
 }
 
 func (c *cmdInit) command() *cobra.Command {
@@ -51,6 +52,9 @@ lxc init ubuntu:24.04 v1 --vm -c limits.cpu=4 -c limits.memory=4GiB
 
 lxc init ubuntu:24.04 v1 --vm -c limits.cpu=2 -c limits.memory=8GiB -d root,size=32GiB
     Create a virtual machine with 2 vCPUs, 8GiB of RAM and a root disk of 32GiB
+
+lxc init ubuntu:24.04 m1 --microvm
+    Create a microvm using the host kernel
 
 Note: The --project flag sets the project for both the image remote and the instance remote.
 If the image remote is a public remote (e.g. simplestreams) then this project is ignored by the image remote.
@@ -71,6 +75,7 @@ with --project and the instance remote with --target-project (if different from 
 	cmd.Flags().BoolVar(&c.flagNoProfiles, "no-profiles", false, "Create the instance with no profiles applied")
 	cmd.Flags().BoolVar(&c.flagEmpty, "empty", false, "Create an empty instance")
 	cmd.Flags().BoolVar(&c.flagVM, "vm", false, "Create a virtual machine")
+	cmd.Flags().BoolVar(&c.flagMicroVM, "microvm", false, "Create a microvm")
 
 	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		if len(args) > 1 {
@@ -271,6 +276,8 @@ func (c *cmdInit) create(conf *config.Config, args []string, launch bool) (lxd.I
 	instanceDBType := api.InstanceTypeContainer
 	if c.flagVM {
 		instanceDBType = api.InstanceTypeVM
+	} else if c.flagMicroVM {
+		instanceDBType = api.InstanceTypeMicroVM
 	}
 
 	// Set the target if provided.
