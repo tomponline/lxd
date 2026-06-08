@@ -3639,3 +3639,17 @@ New configuration options on the load balancer pool are added to further customi
 * {config:option}`network-load-balancer-pool-properties:healthcheck.failure_count`
 
 In addition a new endpoint [`GET /1.0/networks/{networkName}/load-balancer-pools/{poolName}/state`](swagger:/network-load-balancer-pools/network_load_balancer_pool_state_get) is added which returns the health check status for all instances in the pool.
+
+## `instance_microvm`
+
+Adds a new `microvm` instance type that uses QEMU's lightweight `microvm` machine type with direct kernel boot from the host.
+
+MicroVMs use container images but unpack them into an ext4 filesystem inside a disk image file. They boot using the host's kernel and initrd, making them faster to start than full virtual machines while providing stronger isolation than containers.
+
+This extension adds the following instance configuration keys:
+
+* {config:option}`instance-microvm:microvm.kernel_path` - Path to the host kernel to use for booting.
+* {config:option}`instance-microvm:microvm.initrd_path` - Path to the host initrd to use for booting.
+* {config:option}`instance-microvm:microvm.kernel_append` - Additional kernel command line arguments.
+
+Only the `dir` storage pool driver supports MicroVM instances initially. Snapshots and migrations are not supported.
