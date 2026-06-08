@@ -770,7 +770,7 @@ func (c *cmdInfo) instanceInfo(d lxd.InstanceServer, name string, showLog bool) 
 				return err
 			}
 
-		case "virtual-machine":
+		case "virtual-machine", "microvm":
 			log, err = d.GetInstanceLogfile(name, "qemu.log")
 			if err != nil {
 				return err

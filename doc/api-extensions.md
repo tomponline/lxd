@@ -3586,3 +3586,17 @@ Adds a `replica_mode` field to projects and a new `PUT /1.0/projects/<name>/stat
 ## `cluster_links_used_by`
 
 Adds a `used_by` field to `ClusterLink` resources, returned by `GET /1.0/cluster/links` (with `recursion=1`) and `GET /1.0/cluster/links/{name}`. The field lists URLs of entities that reference the cluster link, filtered by the caller's view permissions.
+
+## `instance_microvm`
+
+Adds a new `microvm` instance type that uses QEMU's lightweight `microvm` machine type with direct kernel boot from the host.
+
+MicroVMs use container images but unpack them into an ext4 filesystem inside a disk image file. They boot using the host's kernel and initrd, making them faster to start than full virtual machines while providing stronger isolation than containers.
+
+This extension adds the following instance configuration keys:
+
+* {config:option}`instance-microvm:microvm.kernel_path` - Path to the host kernel to use for booting.
+* {config:option}`instance-microvm:microvm.initrd_path` - Path to the host initrd to use for booting.
+* {config:option}`instance-microvm:microvm.kernel_append` - Additional kernel command line arguments.
+
+Only the `dir` storage pool driver supports MicroVM instances initially. Snapshots and migrations are not supported.
