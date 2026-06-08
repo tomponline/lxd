@@ -3631,3 +3631,17 @@ Adds a `child_count` field to the `Operation` struct, indicating the number of c
 
 Adds NVMe/TCP support to the Dell PowerStore storage driver.
 NVMe/TCP is now the default PowerStore mode when `powerstore.mode` is not set.
+
+## `instance_microvm`
+
+Adds a new `microvm` instance type that uses QEMU's lightweight `microvm` machine type with direct kernel boot from the host.
+
+MicroVMs use container images but unpack them into an ext4 filesystem inside a disk image file. They boot using the host's kernel and initrd, making them faster to start than full virtual machines while providing stronger isolation than containers.
+
+This extension adds the following instance configuration keys:
+
+* {config:option}`instance-microvm:microvm.kernel_path` - Path to the host kernel to use for booting.
+* {config:option}`instance-microvm:microvm.initrd_path` - Path to the host initrd to use for booting.
+* {config:option}`instance-microvm:microvm.kernel_append` - Additional kernel command line arguments.
+
+Only the `dir` storage pool driver supports MicroVM instances initially. Snapshots and migrations are not supported.

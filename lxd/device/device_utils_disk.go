@@ -327,6 +327,7 @@ func DiskVMVirtiofsdStart(inst instance.Instance, socketPath string, pidPath str
 		"--allow-direct-io",
 		"--thread-pool-size", strconv.FormatUint(uint64(threadPoolSize), 10),
 		"--xattr",
+		"--syslog",
 	}
 
 	proc, err := subprocess.NewProcess(cmd, args, logPath, logPath)
