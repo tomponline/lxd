@@ -495,6 +495,7 @@ var APIExtensions = []string{
 	"project_replica_mode",
 	"cluster_links_used_by",
 	"instance_microvm",
+	"microvm_cloud_hypervisor",
 }
 
 // APIExtensionsCount returns the number of available API extensions.
