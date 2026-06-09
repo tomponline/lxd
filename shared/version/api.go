@@ -500,6 +500,7 @@ var APIExtensions = []string{
 	"cluster_links_unidirectional",
 	"network_load_balancer_pool_health_checks",
 	"instance_microvm",
+	"microvm_cloud_hypervisor",
 }
 
 // APIExtensionsCount returns the number of available API extensions.

@@ -3653,3 +3653,11 @@ This extension adds the following instance configuration keys:
 * {config:option}`instance-microvm:microvm.kernel_append` - Additional kernel command line arguments.
 
 Only the `dir` storage pool driver supports MicroVM instances initially. Snapshots and migrations are not supported.
+
+## `microvm_cloud_hypervisor`
+
+Adds support for using cloud-hypervisor as an alternative hypervisor runtime for MicroVM instances.
+
+This extension adds the following instance configuration key:
+
+* {config:option}`instance-microvm:microvm.runtime` - The hypervisor runtime to use (`qemu` or `ch`). Defaults to `qemu`.

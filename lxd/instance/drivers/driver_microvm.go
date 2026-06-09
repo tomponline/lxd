@@ -1,15 +1,18 @@
 package drivers
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io/fs"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -21,6 +24,7 @@ import (
 	"github.com/canonical/lxd/lxd/device"
 	deviceConfig "github.com/canonical/lxd/lxd/device/config"
 	"github.com/canonical/lxd/lxd/instance"
+	"github.com/canonical/lxd/lxd/instance/drivers/ch"
 	"github.com/canonical/lxd/lxd/instance/drivers/qmp"
 	"github.com/canonical/lxd/lxd/instance/instancetype"
 	"github.com/canonical/lxd/lxd/instance/operationlock"
@@ -296,6 +300,41 @@ func (d *microvm) getInitrdPath() string {
 // getKernelAppend returns additional kernel command line arguments.
 func (d *microvm) getKernelAppend() string {
 	return d.expandedConfig["microvm.kernel_append"]
+}
+
+// getRuntime returns the configured hypervisor runtime ("qemu" or "ch").
+func (d *microvm) getRuntime() string {
+	runtime := d.expandedConfig["microvm.runtime"]
+	if runtime == "" {
+		return "qemu"
+	}
+
+	return runtime
+}
+
+// isCloudHypervisor returns true if the configured runtime is cloud-hypervisor.
+func (d *microvm) isCloudHypervisor() bool {
+	return d.getRuntime() == "ch"
+}
+
+// chAPISocketPath returns the path to the cloud-hypervisor API socket.
+func (d *microvm) chAPISocketPath() string {
+	return filepath.Join(d.LogPath(), "ch.sock")
+}
+
+// chVsockSocketPath returns the path to the cloud-hypervisor vsock socket.
+func (d *microvm) chVsockSocketPath() string {
+	return filepath.Join(d.LogPath(), "ch.vsock")
+}
+
+// chPidFilePath returns the path to the cloud-hypervisor PID file.
+func (d *microvm) chPidFilePath() string {
+	return filepath.Join(d.LogPath(), "ch.pid")
+}
+
+// chConsolePath returns the path to the cloud-hypervisor serial console socket.
+func (d *microvm) chConsolePath() string {
+	return filepath.Join(d.LogPath(), "ch.console")
 }
 
 // Start starts the MicroVM instance using QEMU's microvm machine type with direct kernel boot.
@@ -639,20 +678,13 @@ func (d *microvm) Start(ctx context.Context, stateful bool, progressReporter iop
 		}
 	}
 
-	// Generate MicroVM QEMU config.
-	confFile, err := d.generateMicroVMConfigFile(vsockFD, rootDiskPath, configMntPath, nics, &fdFiles)
-	if err != nil {
-		op.Done(err)
-		return err
-	}
-
 	// Configure memory limit.
 	memSize := d.expandedConfig["limits.memory"]
 	if memSize == "" {
 		memSize = QEMUDefaultMemSize
 	}
 
-	// Parse memory size to bytes and convert to MB for QEMU.
+	// Parse memory size to bytes and convert to MB.
 	memSizeBytes, err := parseMemoryStr(memSize)
 	if err != nil {
 		err = fmt.Errorf("limits.memory invalid: %w", err)
@@ -661,6 +693,24 @@ func (d *microvm) Start(ctx context.Context, stateful bool, progressReporter iop
 	}
 
 	memSizeMB := memSizeBytes / 1024 / 1024
+
+	// Build kernel command line.
+	kernelAppend := "console=ttyS0 root=/dev/vda rw nocrypt cryptopts=skip"
+	if extraAppend := d.getKernelAppend(); extraAppend != "" {
+		kernelAppend = kernelAppend + " " + extraAppend
+	}
+
+	// Dispatch to the appropriate hypervisor.
+	if d.isCloudHypervisor() {
+		return d.startCloudHypervisor(ctx, op, revert, kernelPath, initrdPath, rootDiskPath, nics, vsockID, memSizeMB, instUUID, kernelAppend, postStartHooks, fdFiles)
+	}
+
+	// Generate MicroVM QEMU config.
+	confFile, err := d.generateMicroVMConfigFile(vsockFD, rootDiskPath, configMntPath, nics, &fdFiles)
+	if err != nil {
+		op.Done(err)
+		return err
+	}
 
 	// Build QEMU command.
 	qemuCmd := []string{
@@ -682,15 +732,8 @@ func (d *microvm) Start(ctx context.Context, stateful bool, progressReporter iop
 		"-m", fmt.Sprintf("%dM", memSizeMB),
 		"-kernel", kernelPath,
 		"-initrd", initrdPath,
+		"-append", kernelAppend,
 	}
-
-	// Build kernel command line.
-	kernelAppend := "console=ttyS0 root=/dev/vda rw nocrypt cryptopts=skip"
-	if extraAppend := d.getKernelAppend(); extraAppend != "" {
-		kernelAppend = kernelAppend + " " + extraAppend
-	}
-
-	qemuCmd = append(qemuCmd, "-append", kernelAppend)
 
 	// Handle raw.qemu.
 	if d.expandedConfig["raw.qemu"] != "" {
@@ -813,6 +856,488 @@ func (d *microvm) Start(ctx context.Context, stateful bool, progressReporter iop
 	d.logger.Info("Started instance", logger.Ctx{"pid": pid})
 
 	return nil
+}
+
+// cloudHypervisorBinaryPath is the path to the cloud-hypervisor binary.
+const cloudHypervisorBinaryPath = "/home/thomas.parrott@canonical.com/Downloads/cloud-hypervisor-static"
+
+// startCloudHypervisor starts the MicroVM instance using cloud-hypervisor.
+func (d *microvm) startCloudHypervisor(ctx context.Context, op *operationlock.InstanceOperation, revert *revert.Reverter, kernelPath string, initrdPath string, rootDiskPath string, nics []microVMNIC, vsockID uint32, memSizeMB int64, instUUID string, kernelCmdline string, postStartHooks []func() error, fdFiles []*os.File) error {
+	// Check cloud-hypervisor binary exists.
+	if !shared.PathExists(cloudHypervisorBinaryPath) {
+		err := fmt.Errorf("Cloud-hypervisor binary not found at %q", cloudHypervisorBinaryPath)
+		op.Done(err)
+		return err
+	}
+
+	// Configure CPU count, default to 1.
+	cpuCount := d.expandedConfig["limits.cpu"]
+	if cpuCount == "" {
+		cpuCount = "1"
+	}
+
+	// Build cloud-hypervisor command.
+	chCmd := []string{
+		cloudHypervisorBinaryPath,
+		"--api-socket", d.chAPISocketPath(),
+		"--log-file", d.LogFilePath(),
+		"--kernel", kernelPath,
+		"--initramfs", initrdPath,
+		"--cmdline", kernelCmdline,
+		"--cpus", "boot=" + cpuCount,
+		"--memory", fmt.Sprintf("size=%dM", memSizeMB),
+		"--disk", "path=" + rootDiskPath + ",image_type=raw",
+		"--vsock", fmt.Sprintf("cid=%d,socket=%s", vsockID, d.chVsockSocketPath()),
+		"--serial", "socket=" + d.chConsolePath(),
+		"--console", "off",
+	}
+
+	// Add NIC configurations.
+	for _, nic := range nics {
+		// Use fd= to pass the pre-opened TAP file descriptor.
+		// num_queues=1 since we have one fd per NIC.
+		chCmd = append(chCmd, "--net", fmt.Sprintf("fd=%d,mac=%s", nic.tapFD, nic.hwaddr))
+	}
+
+	d.logger.Debug("Starting cloud-hypervisor", logger.Ctx{"cmd": strings.Join(chCmd, " ")})
+
+	// Remove old API socket if it exists.
+	_ = os.Remove(d.chAPISocketPath())
+
+	// Remove old PID file if it exists.
+	_ = os.Remove(d.chPidFilePath())
+
+	// Setup the process using subprocess package.
+	logFilePath := d.LogFilePath()
+	p, err := subprocess.NewProcess(chCmd[0], chCmd[1:], logFilePath, logFilePath)
+	if err != nil {
+		err = fmt.Errorf("Failed creating cloud-hypervisor process: %w", err)
+		op.Done(err)
+		return err
+	}
+
+	// Start the process with TAP file descriptors.
+	err = p.StartWithFiles(context.Background(), fdFiles)
+	if err != nil {
+		err = fmt.Errorf("Failed starting cloud-hypervisor: %w", err)
+		op.Done(err)
+		return err
+	}
+
+	pid := int(p.PID)
+
+	// Write PID file.
+	err = os.WriteFile(d.chPidFilePath(), []byte(strconv.Itoa(pid)), 0640)
+	if err != nil {
+		_ = p.Stop()
+		err = fmt.Errorf("Failed writing PID file: %w", err)
+		op.Done(err)
+		return err
+	}
+
+	revert.Add(func() {
+		_ = p.Stop()
+	})
+
+	// Wait for the API socket to appear.
+	ctxTimeout, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	for !shared.PathExists(d.chAPISocketPath()) {
+		// Check if process exited early.
+		_, pidErr := p.GetPid()
+		if pidErr != nil {
+			logContent, _ := os.ReadFile(logFilePath)
+			err = fmt.Errorf("Cloud-hypervisor process exited unexpectedly\nLog: %s", string(logContent))
+			op.Done(err)
+			return err
+		}
+
+		select {
+		case <-ctxTimeout.Done():
+			err = fmt.Errorf("Timed out waiting for cloud-hypervisor API socket: %w", ctxTimeout.Err())
+			op.Done(err)
+			return err
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+
+	// Verify the VM is running via the API.
+	chClient := ch.NewClient(d.chAPISocketPath())
+
+	_, err = chClient.Ping(ctxTimeout)
+	if err != nil {
+		err = fmt.Errorf("Failed connecting to cloud-hypervisor API: %w", err)
+		op.Done(err)
+		return err
+	}
+
+	// Record last state.
+	err = d.recordLastState()
+	if err != nil {
+		op.Done(err)
+		return err
+	}
+
+	// Run any post-start hooks.
+	err = d.runHooks(postStartHooks)
+	if err != nil {
+		op.Done(err)
+		return err
+	}
+
+	d.state.Events.SendLifecycle(d.project.Name, lifecycle.InstanceStarted.Event(ctx, d, nil))
+
+	revert.Success()
+
+	d.logger.Info("Started cloud-hypervisor instance", logger.Ctx{"pid": pid})
+
+	return nil
+}
+
+// killCloudHypervisorProcess kills the cloud-hypervisor process by PID.
+func (d *microvm) killCloudHypervisorProcess(pid int) error {
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return err
+	}
+
+	return proc.Kill()
+}
+
+// processExists checks if a process with the given PID exists.
+func (d *microvm) processExists(pid int) bool {
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+
+	// On Unix, FindProcess always succeeds. We need to send signal 0 to check if the process exists.
+	err = proc.Signal(syscall.Signal(0))
+	return err == nil
+}
+
+// stopCloudHypervisor stops a cloud-hypervisor instance.
+func (d *microvm) stopCloudHypervisor(ctx context.Context, op *operationlock.InstanceOperation) error {
+	// Try graceful shutdown via the REST API.
+	chClient := ch.NewClient(d.chAPISocketPath())
+
+	err := chClient.ShutdownVMM(ctx)
+	if err != nil {
+		d.logger.Warn("Failed to gracefully shutdown cloud-hypervisor via API, forcing stop", logger.Ctx{"err": err})
+	}
+
+	// Wait for the process to exit or force kill after timeout.
+	pid, _ := d.chPid()
+	if pid > 0 {
+		// Wait up to 30 seconds for graceful shutdown.
+		ctxTimeout, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		for d.processExists(pid) {
+			select {
+			case <-ctxTimeout.Done():
+				d.logger.Warn("Timed out waiting for cloud-hypervisor to exit, forcing stop")
+
+				err = d.killCloudHypervisorProcess(pid)
+				if err != nil {
+					d.logger.Warn("Failed to kill cloud-hypervisor process", logger.Ctx{"err": err})
+				}
+
+				// Give it a moment to actually die.
+				time.Sleep(100 * time.Millisecond)
+			case <-time.After(100 * time.Millisecond):
+				continue
+			}
+
+			break
+		}
+	}
+
+	// Clean up PID file.
+	_ = os.Remove(d.chPidFilePath())
+
+	// Wait for onStop to complete device cleanup.
+	err = d.onStop(ctx, "stop")
+	if err != nil {
+		op.Done(err)
+		return err
+	}
+
+	d.state.Events.SendLifecycle(d.project.Name, lifecycle.InstanceStopped.Event(ctx, d, nil))
+
+	op.Done(nil)
+	return nil
+}
+
+// chPid gets the PID of the running cloud-hypervisor process. Returns 0 if PID file or process not found.
+func (d *microvm) chPid() (int, error) {
+	pidStr, err := os.ReadFile(d.chPidFilePath())
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, nil
+		}
+
+		return -1, err
+	}
+
+	pid, err := strconv.Atoi(strings.TrimSpace(string(pidStr)))
+	if err != nil {
+		return -1, err
+	}
+
+	// Check if the process is still running and is cloud-hypervisor.
+	cmdLineProcFilePath := fmt.Sprintf("/proc/%d/cmdline", pid)
+	cmdLine, err := os.ReadFile(cmdLineProcFilePath)
+	if err != nil {
+		return 0, nil // Process has gone.
+	}
+
+	if !bytes.Contains(cmdLine, []byte("cloud-hypervisor")) {
+		return -1, errors.New("PID does not match a cloud-hypervisor process")
+	}
+
+	return pid, nil
+}
+
+// pid overrides the qemu pid method to handle cloud-hypervisor.
+func (d *microvm) pid() (int, error) {
+	if d.isCloudHypervisor() {
+		return d.chPid()
+	}
+
+	return d.qemu.pid()
+}
+
+// statusCode overrides the qemu statusCode method to handle cloud-hypervisor.
+func (d *microvm) statusCode() api.StatusCode {
+	// Shortcut to avoid spamming during ongoing operations.
+	operationStatus := d.operationStatusCode()
+	if operationStatus != nil {
+		return *operationStatus
+	}
+
+	if d.isCloudHypervisor() {
+		// For cloud-hypervisor, check if the process is running.
+		pid, _ := d.chPid()
+		if pid > 0 {
+			// Process is running - check API for more detailed status.
+			chClient := ch.NewClient(d.chAPISocketPath())
+
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+
+			info, err := chClient.GetInfo(ctx)
+			if err != nil {
+				// Cannot connect to API but process exists - error state.
+				return api.Error
+			}
+
+			switch info.State {
+			case "Running":
+				if shared.IsTrue(d.LocalConfig()["volatile.last_state.ready"]) {
+					return api.Ready
+				}
+
+				return api.Running
+			case "Paused":
+				return api.Frozen
+			default:
+				return api.Error
+			}
+		}
+
+		return api.Stopped
+	}
+
+	return d.qemu.statusCode()
+}
+
+// State overrides the qemu State method to use microvm's statusCode.
+func (d *microvm) State() string {
+	return strings.ToUpper(d.statusCode().String())
+}
+
+// IsRunning overrides the qemu IsRunning method to use microvm's statusCode.
+func (d *microvm) IsRunning() bool {
+	return d.isRunningStatusCode(d.statusCode())
+}
+
+// IsFrozen overrides the qemu IsFrozen method to use microvm's statusCode.
+func (d *microvm) IsFrozen() bool {
+	return d.statusCode() == api.Frozen
+}
+
+// Render overrides the qemu Render method to use microvm's statusCode.
+func (d *microvm) Render(options ...func(response any) error) (state any, etag any, err error) {
+	profileNames := make([]string, 0, len(d.profiles))
+	for _, profile := range d.profiles {
+		profileNames = append(profileNames, profile.Name)
+	}
+
+	if d.IsSnapshot() {
+		// Prepare the ETag
+		etag := []any{d.expiryDate}
+
+		snapState := api.InstanceSnapshot{
+			Name:            strings.SplitN(d.name, "/", 2)[1],
+			Architecture:    d.architectureName,
+			Profiles:        profileNames,
+			Config:          d.localConfig,
+			ExpandedConfig:  d.expandedConfig,
+			Devices:         d.localDevices.CloneNative(),
+			ExpandedDevices: d.expandedDevices.CloneNative(),
+			CreatedAt:       d.creationDate,
+			LastUsedAt:      d.lastUsedDate,
+			ExpiresAt:       d.expiryDate,
+			Ephemeral:       d.ephemeral,
+			Stateful:        d.stateful,
+
+			// Default to uninitialised/error state (0 means no CoW usage).
+			// The size can then be populated optionally via the options argument.
+			Size: -1,
+		}
+
+		for _, option := range options {
+			err := option(&snapState)
+			if err != nil {
+				return nil, nil, err
+			}
+		}
+
+		return &snapState, etag, nil
+	}
+
+	// Prepare the ETag
+	etag = []any{d.architecture, d.localConfig, d.localDevices, d.ephemeral, d.profiles}
+
+	instState := api.Instance{
+		Name:            d.name,
+		Description:     d.description,
+		Architecture:    d.architectureName,
+		Profiles:        profileNames,
+		Config:          d.localConfig,
+		ExpandedConfig:  d.expandedConfig,
+		Devices:         d.localDevices.CloneNative(),
+		ExpandedDevices: d.expandedDevices.CloneNative(),
+		CreatedAt:       d.creationDate,
+		LastUsedAt:      d.lastUsedDate,
+		Ephemeral:       d.ephemeral,
+		Stateful:        d.stateful,
+		Project:         d.project.Name,
+		Location:        d.node,
+		Type:            d.Type().String(),
+		StatusCode:      api.Error, // Default to error status for remote instances that are unreachable.
+	}
+
+	// If instance is local then request status.
+	if d.state.ServerName == d.Location() {
+		instState.StatusCode = d.statusCode()
+	}
+
+	instState.Status = instState.StatusCode.String()
+
+	for _, option := range options {
+		err := option(&instState)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+
+	return &instState, etag, nil
+}
+
+// RenderFull overrides the qemu RenderFull method to use microvm's Render.
+func (d *microvm) RenderFull(_ []net.Interface, opts ...instance.StateRenderOptions) (*api.InstanceFull, any, error) {
+	if d.IsSnapshot() {
+		return nil, nil, errors.New("RenderFull does not work with snapshots")
+	}
+
+	// Get the Instance struct.
+	base, etag, err := d.Render()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Convert to InstanceFull.
+	vmState := api.InstanceFull{Instance: *base.(*api.Instance)}
+
+	// Add the InstanceState (pass through opts).
+	vmState.State, err = d.renderState(vmState.StatusCode, opts...)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Add the InstanceSnapshots.
+	snaps, err := d.Snapshots()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	for _, snap := range snaps {
+		render, _, err := snap.Render()
+		if err != nil {
+			return nil, nil, err
+		}
+
+		if vmState.Snapshots == nil {
+			vmState.Snapshots = []api.InstanceSnapshot{}
+		}
+
+		vmState.Snapshots = append(vmState.Snapshots, *render.(*api.InstanceSnapshot))
+	}
+
+	// Add the InstanceBackups.
+	backups, err := d.Backups()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	for _, backup := range backups {
+		render := backup.Render()
+
+		if vmState.Backups == nil {
+			vmState.Backups = []api.InstanceBackup{}
+		}
+
+		vmState.Backups = append(vmState.Backups, *render)
+	}
+
+	return &vmState, etag, nil
+}
+
+// RenderState overrides the qemu RenderState method to use microvm's statusCode.
+func (d *microvm) RenderState(_ []net.Interface, opts ...instance.StateRenderOptions) (*api.InstanceState, error) {
+	return d.renderState(d.statusCode(), opts...)
+}
+
+// Console overrides the qemu Console method to handle cloud-hypervisor console path.
+func (d *microvm) Console(ctx context.Context, protocol string) (*os.File, chan error, error) {
+	if d.isCloudHypervisor() && protocol == instance.ConsoleTypeConsole {
+		path := d.chConsolePath()
+
+		// Disconnection notification.
+		chDisconnect := make(chan error, 1)
+
+		// Open the console socket.
+		conn, err := net.Dial("unix", path)
+		if err != nil {
+			return nil, nil, fmt.Errorf("Failed connecting to console socket %q: %w", path, err)
+		}
+
+		file, err := (conn.(*net.UnixConn)).File()
+		if err != nil {
+			return nil, nil, fmt.Errorf("Failed getting socket file: %w", err)
+		}
+
+		_ = conn.Close()
+
+		d.state.Events.SendLifecycle(d.project.Name, lifecycle.InstanceConsole.Event(ctx, d, logger.Ctx{"type": protocol}))
+
+		return file, chDisconnect, nil
+	}
+
+	return d.qemu.Console(ctx, protocol)
 }
 
 // microVMNIC represents a NIC configuration for MicroVM.
@@ -958,7 +1483,7 @@ func (d *microvm) generateMicroVMConfigFile(vsockFD int, rootDiskPath string, co
 
 		cfg = append(cfg, cfgSection{
 			name:    "netdev",
-			comment: fmt.Sprintf("Network device %s", nic.devName),
+			comment: "Network device " + nic.devName,
 			entries: netdevEntries,
 		})
 
@@ -971,7 +1496,7 @@ func (d *microvm) generateMicroVMConfigFile(vsockFD int, rootDiskPath string, co
 
 		cfg = append(cfg, cfgSection{
 			name:    "device",
-			comment: fmt.Sprintf("NIC %s", nic.devName),
+			comment: "NIC " + nic.devName,
 			entries: devEntries,
 		})
 	}
@@ -1035,6 +1560,11 @@ func (d *microvm) Stop(ctx context.Context, stateful bool) error {
 		return err
 	}
 
+	// Dispatch to the appropriate hypervisor stop method.
+	if d.isCloudHypervisor() {
+		return d.stopCloudHypervisor(ctx, op)
+	}
+
 	// Connect to the monitor.
 	monitor, err := qmp.Connect(d.monitorPath(), qemuSerialChardevName, d.getMonitorEventHandler())
 	if err != nil {
@@ -1048,7 +1578,7 @@ func (d *microvm) Stop(ctx context.Context, stateful bool) error {
 		}
 
 		// Wait for QEMU process to exit and perform device cleanup.
-		err = d.qemu.onStop(ctx, "stop")
+		err = d.onStop(ctx, "stop")
 		if err != nil {
 			op.Done(err)
 			return err
