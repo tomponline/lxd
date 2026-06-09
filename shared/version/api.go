@@ -500,6 +500,7 @@ var APIExtensions = []string{
 	"operation_child_count",
 	"storage_driver_powerstore_nvme",
 	"instance_microvm",
+	"microvm_cloud_hypervisor",
 }
 
 // APIExtensionsCount returns the number of available API extensions.

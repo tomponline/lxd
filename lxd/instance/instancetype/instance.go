@@ -1214,6 +1214,16 @@ var InstanceConfigKeysMicroVM = map[string]func(value string) error{
 	//  condition: microvm
 	//  shortdesc: Additional kernel command line arguments
 	"microvm.kernel_append": validate.IsAny,
+
+	// lxdmeta:generate(entities=instance; group=microvm; key=microvm.runtime)
+	// The hypervisor runtime to use for the microvm.
+	// ---
+	//  type: string
+	//  defaultdesc: `qemu`
+	//  liveupdate: no
+	//  condition: microvm
+	//  shortdesc: Hypervisor runtime (`qemu` or `ch`)
+	"microvm.runtime": validate.Optional(validate.IsOneOf("qemu", "ch")),
 }
 
 // ConfigKeyChecker returns a function that will check whether or not
@@ -1235,7 +1245,7 @@ func ConfigKeyChecker(key string, instanceType Type) (func(value string) error, 
 		}
 	}
 
-	if instanceType == Any || instanceType == VM {
+	if instanceType == Any || instanceType == VM || instanceType == MicroVM {
 		f, ok := InstanceConfigKeysVM[key]
 		if ok {
 			return f, nil
