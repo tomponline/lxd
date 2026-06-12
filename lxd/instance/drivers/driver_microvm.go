@@ -283,9 +283,13 @@ func (d *microvm) getKernelPath() string {
 // getInitrdPath returns the path to the initrd to use for booting.
 func (d *microvm) getInitrdPath() string {
 	initrdPath := d.expandedConfig["microvm.initrd_path"]
-	if initrdPath == "" {
+
+	switch initrdPath {
+	case "":
 		// Default to the host's current initrd.
 		initrdPath = "/boot/initrd.img"
+	case "none":
+		return ""
 	}
 
 	// Resolve symlinks to get the actual initrd file.
@@ -372,7 +376,7 @@ func (d *microvm) Start(ctx context.Context, stateful bool, progressReporter iop
 	}
 
 	initrdPath := d.getInitrdPath()
-	if !shared.PathExists(initrdPath) {
+	if initrdPath != "" && !shared.PathExists(initrdPath) {
 		return fmt.Errorf("Initrd not found at %q", initrdPath)
 	}
 
@@ -731,8 +735,11 @@ func (d *microvm) Start(ctx context.Context, stateful bool, progressReporter iop
 		"-D", d.LogFilePath(),
 		"-m", fmt.Sprintf("%dM", memSizeMB),
 		"-kernel", kernelPath,
-		"-initrd", initrdPath,
 		"-append", kernelAppend,
+	}
+
+	if initrdPath != "" {
+		qemuCmd = append(qemuCmd, "-initrd", initrdPath)
 	}
 
 	// Handle raw.qemu.
@@ -882,7 +889,6 @@ func (d *microvm) startCloudHypervisor(ctx context.Context, op *operationlock.In
 		"--api-socket", d.chAPISocketPath(),
 		"--log-file", d.LogFilePath(),
 		"--kernel", kernelPath,
-		"--initramfs", initrdPath,
 		"--cmdline", kernelCmdline,
 		"--cpus", "boot=" + cpuCount,
 		"--memory", fmt.Sprintf("size=%dM", memSizeMB),
@@ -890,6 +896,10 @@ func (d *microvm) startCloudHypervisor(ctx context.Context, op *operationlock.In
 		"--vsock", fmt.Sprintf("cid=%d,socket=%s", vsockID, d.chVsockSocketPath()),
 		"--serial", "socket=" + d.chConsolePath(),
 		"--console", "off",
+	}
+
+	if initrdPath != "" {
+		chCmd = append(chCmd, "--initramfs", initrdPath)
 	}
 
 	// Add NIC configurations.
