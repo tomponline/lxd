@@ -699,7 +699,7 @@ func (d *microvm) Start(ctx context.Context, stateful bool, progressReporter iop
 	memSizeMB := memSizeBytes / 1024 / 1024
 
 	// Build kernel command line.
-	kernelAppend := "console=ttyS0 root=/dev/vda rw rootfstype=ext4 fastboot nocrypt cryptopts=skip"
+	kernelAppend := "console=ttyS0 root=/dev/vda rw"
 	if extraAppend := d.getKernelAppend(); extraAppend != "" {
 		kernelAppend = kernelAppend + " " + extraAppend
 	}
