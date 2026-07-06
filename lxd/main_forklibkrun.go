@@ -13,7 +13,6 @@ import (
 	"github.com/spf13/cobra"
 
 	libkrun "github.com/canonical/lxd/go-libkrun"
-	"github.com/canonical/lxd/lxd-user/callhook"
 	"github.com/canonical/lxd/shared"
 )
 
@@ -64,16 +63,6 @@ func (c *cmdForklibkrun) command() *cobra.Command {
 	cmd.Flags().StringVar(&c.flagInstance, "instance", "", "Instance name for stop callback")
 
 	return cmd
-}
-
-// notifyLXDStop calls back into the LXD daemon so host-side cleanup runs even when libkrun exits by itself.
-func (c *cmdForklibkrun) notifyLXDStop() error {
-	// Keep backward compatibility for older callers that don't provide callback context.
-	if c.flagLXDPath == "" || c.flagInstance == "" {
-		return nil
-	}
-
-	return callhook.HandleContainerHook(c.flagLXDPath, c.flagProject, c.flagInstance, "stop")
 }
 
 // kernelFormat maps a format name to the libkrun kernel format constant. When set to "auto"
@@ -287,17 +276,7 @@ func (c *cmdForklibkrun) run(_ *cobra.Command, _ []string) error {
 	// process with the workload's exit code.
 	err = ctx.StartEnter()
 	if err != nil {
-		cbErr := c.notifyLXDStop()
-		if cbErr != nil {
-			return fmt.Errorf("Failed starting libkrun MicroVM: %w (also failed stop callback: %w)", err, cbErr)
-		}
-
 		return fmt.Errorf("Failed starting libkrun MicroVM: %w", err)
-	}
-
-	err = c.notifyLXDStop()
-	if err != nil {
-		return fmt.Errorf("Failed sending stop callback to LXD: %w", err)
 	}
 
 	return nil
