@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -29,6 +30,7 @@ import (
 	"github.com/canonical/lxd/lxd/instance/instancetype"
 	"github.com/canonical/lxd/lxd/instance/operationlock"
 	"github.com/canonical/lxd/lxd/lifecycle"
+	"github.com/canonical/lxd/lxd/linux"
 	"github.com/canonical/lxd/lxd/state"
 	storagePools "github.com/canonical/lxd/lxd/storage"
 	storageDrivers "github.com/canonical/lxd/lxd/storage/drivers"
@@ -41,6 +43,16 @@ import (
 	"github.com/canonical/lxd/shared/logger"
 	"github.com/canonical/lxd/shared/osarch"
 	"github.com/canonical/lxd/shared/revert"
+)
+
+// libkrunWatchers tracks active pidfd exit-watcher goroutines for libkrun helper processes.
+// The map key is "project/instance" and the value is the PID being watched.
+// This ensures that when a forklibkrun process exits unexpectedly, LXD detects it and
+// triggers onStop to clean up instance resources on the host — mirroring how QEMU's
+// QMP socket disconnect fires a synthetic SHUTDOWN event that calls onStop.
+var (
+	libkrunWatchers     = map[string]int{}
+	libkrunWatchersLock sync.Mutex
 )
 
 // microvmLoad creates a MicroVM instance from the supplied InstanceArgs.
@@ -1143,7 +1155,12 @@ func (d *microvm) startLibkrun(ctx context.Context, op *operationlock.InstanceOp
 		return err
 	}
 
+	// Subscribe to process exit via a pidfd so that an unexpected VM crash triggers
+	// host-side resource cleanup without requiring a poll loop or daemon restart.
+	d.monitorLibkrunProcess(pid)
+
 	revert.Add(func() {
+		d.stopLibkrunMonitor()
 		_ = p.Stop()
 	})
 
@@ -1191,6 +1208,101 @@ func (d *microvm) startLibkrun(ctx context.Context, op *operationlock.InstanceOp
 	d.logger.Info("Started libkrun instance", logger.Ctx{"pid": pid})
 
 	return nil
+}
+
+// libkrunWatcherKey returns the map key used to track a libkrun watcher for this instance.
+func (d *microvm) libkrunWatcherKey() string {
+	return d.project.Name + "/" + d.Name()
+}
+
+// monitorLibkrunProcess opens a pidfd for the given forklibkrun helper PID and starts a
+// goroutine that blocks until the process exits. When an unexpected exit is detected (i.e.
+// stopLibkrunMonitor has not been called to deregister the watcher), onStop is called to
+// perform full host-side resource cleanup. This mirrors how QEMU's QMP socket disconnect
+// synthesises a SHUTDOWN event that triggers onStop.
+//
+// The call is idempotent: if a watcher is already registered for this PID it returns
+// immediately, so it is safe to call from both startLibkrun and statusCode.
+func (d *microvm) monitorLibkrunProcess(pid int) {
+	key := d.libkrunWatcherKey()
+
+	libkrunWatchersLock.Lock()
+	if existing, ok := libkrunWatchers[key]; ok && existing == pid {
+		// Already watching this exact PID.
+		libkrunWatchersLock.Unlock()
+		return
+	}
+
+	libkrunWatchers[key] = pid
+	libkrunWatchersLock.Unlock()
+
+	// Open a pidfd for the process. This will fail if the process has already exited.
+	pidFdFile, err := linux.PidFdOpen(pid, 0)
+	if err != nil {
+		d.logger.Warn("Failed to open pidfd for libkrun process, exit detection unavailable", logger.Ctx{"pid": pid, "err": err})
+
+		libkrunWatchersLock.Lock()
+		if libkrunWatchers[key] == pid {
+			delete(libkrunWatchers, key)
+		}
+
+		libkrunWatchersLock.Unlock()
+		return
+	}
+
+	d.logger.Debug("Monitoring libkrun process via pidfd", logger.Ctx{"pid": pid})
+
+	go func() {
+		defer func() { _ = pidFdFile.Close() }()
+
+		// Poll the pidfd until POLLIN becomes set, which the kernel guarantees when
+		// the process exits. Retry on EINTR (signal delivery to the daemon).
+		fds := []unix.PollFd{{Fd: int32(pidFdFile.Fd()), Events: unix.POLLIN}}
+		for {
+			_, err := unix.Poll(fds, -1)
+			if err == unix.EINTR {
+				continue
+			}
+
+			break
+		}
+
+		// The process has exited. Check whether stopLibkrunMonitor already deregistered
+		// us, which means a normal Stop() is in progress and will handle cleanup itself.
+		libkrunWatchersLock.Lock()
+		registered := libkrunWatchers[key] == pid
+		if registered {
+			delete(libkrunWatchers, key)
+		}
+
+		libkrunWatchersLock.Unlock()
+
+		if !registered {
+			// Normal stop path deregistered the watcher before killing the process;
+			// stopLibkrun will call onStop directly.
+			return
+		}
+
+		// Unexpected exit: trigger full instance cleanup. onStopOperationSetup will
+		// create a new instance-initiated operation since no Stop() is in flight.
+		d.logger.Debug("libkrun process exited unexpectedly, triggering instance cleanup", logger.Ctx{"pid": pid})
+
+		err = d.onStop(context.Background(), "stop")
+		if err != nil {
+			d.logger.Error("Failed running onStop after unexpected libkrun exit", logger.Ctx{"err": err})
+		}
+	}()
+}
+
+// stopLibkrunMonitor deregisters the active pidfd watcher for this instance so that a
+// concurrent goroutine in monitorLibkrunProcess does not also call onStop when the process
+// is killed by the normal stopLibkrun code path.
+func (d *microvm) stopLibkrunMonitor() {
+	key := d.libkrunWatcherKey()
+
+	libkrunWatchersLock.Lock()
+	delete(libkrunWatchers, key)
+	libkrunWatchersLock.Unlock()
 }
 
 // killCloudHypervisorProcess kills the cloud-hypervisor process by PID.
@@ -1331,6 +1443,10 @@ func (d *microvm) libkrunPid() (int, error) {
 // stopLibkrun stops a libkrun instance by terminating the helper process.
 // libkrun has no external control channel, so the VM is stopped by killing the helper.
 func (d *microvm) stopLibkrun(ctx context.Context, op *operationlock.InstanceOperation) error {
+	// Deregister the pidfd watcher before killing the process so the goroutine in
+	// monitorLibkrunProcess does not also call onStop when it observes the exit.
+	d.stopLibkrunMonitor()
+
 	pid, _ := d.libkrunPid()
 	if pid > 0 {
 		err := d.killCloudHypervisorProcess(pid)
@@ -1429,6 +1545,12 @@ func (d *microvm) statusCode() api.StatusCode {
 		// For libkrun, there is no control channel, so status is derived from the helper process.
 		pid, _ := d.libkrunPid()
 		if pid > 0 {
+			// Re-subscribe to process exit via pidfd on every statusCode call that finds a
+			// running process. This is a no-op if already monitoring this PID, but re-establishes
+			// the watcher after a daemon restart (mirrors how QEMU's statusCode reconnects the
+			// QMP socket as a side effect so the disconnect event fires on unexpected VM exit).
+			d.monitorLibkrunProcess(pid)
+
 			if shared.IsTrue(d.LocalConfig()["volatile.last_state.ready"]) {
 				return api.Ready
 			}
