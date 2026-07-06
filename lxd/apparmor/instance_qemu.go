@@ -116,6 +116,16 @@ profile "{{ .name }}" flags=(attach_disconnected,mediate_deleted) {
   {{ .firmwarePath }}                         kr,
 {{- end }}
 
+{{if .kernelPath -}}
+  # MicroVM kernel path
+  {{ .kernelPath }}                           kr,
+{{- end }}
+
+{{if .initrdPath -}}
+  # MicroVM initrd path
+  {{ .initrdPath }}                           kr,
+{{- end }}
+
 {{- if .raw }}
 
   ### Configuration: raw.apparmor
