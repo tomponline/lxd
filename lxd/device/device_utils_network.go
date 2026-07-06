@@ -305,9 +305,22 @@ func networkCreateVethPair(hostName string, m deviceConfig.Device) (string, uint
 	return veth.Peer.Name, veth.Peer.MTU, nil
 }
 
+// networkTapMultiQueue reports whether the TAP device for the given instance should be created
+// with the multi-queue flag. The libkrun MicroVM runtime opens the TAP itself and attaches a
+// single queue without IFF_MULTI_QUEUE, so a multi-queue TAP would fail to activate. All other
+// cases (QEMU VMs and the QEMU-based MicroVM runtime, which open the TAP with IFF_MULTI_QUEUE)
+// use multi-queue.
+func networkTapMultiQueue(inst instance.Instance) bool {
+	if inst.Type() == instancetype.MicroVM && inst.ExpandedConfig()["microvm.runtime"] == "libkrun" {
+		return false
+	}
+
+	return true
+}
+
 // networkCreateTap creates and configures a TAP device.
 // Returns the MTU used.
-func networkCreateTap(hostName string, m deviceConfig.Device) (uint32, error) {
+func networkCreateTap(hostName string, m deviceConfig.Device, multiQueue bool) (uint32, error) {
 	hostMTU, instanceMTU, err := networkCalculatePairMTU(m)
 	if err != nil {
 		return 0, err
@@ -316,7 +329,7 @@ func networkCreateTap(hostName string, m deviceConfig.Device) (uint32, error) {
 	tuntap := &ip.Tuntap{
 		Name:       hostName,
 		Mode:       "tap",
-		MultiQueue: true,
+		MultiQueue: multiQueue,
 	}
 
 	err = tuntap.Add()
