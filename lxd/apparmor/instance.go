@@ -33,6 +33,11 @@ type instanceVM interface {
 	FirmwarePath() string
 }
 
+type instanceVMBootFiles interface {
+	KernelPath() string
+	InitrdPath() string
+}
+
 // InstanceProfileName returns the instance's AppArmor profile name.
 func InstanceProfileName(inst instance) string {
 	path := shared.VarPath("")
@@ -211,6 +216,27 @@ func instanceProfile(sysOS *sys.OS, inst instance) (string, error) {
 			}
 		}
 
+		// Get start time kernel/initrd paths for MicroVM instances to allow access to them.
+		kernelPath := ""
+		initrdPath := ""
+		if vmBootFiles, ok := inst.(instanceVMBootFiles); ok {
+			kernelPath = vmBootFiles.KernelPath()
+			if kernelPath != "" {
+				kernelPath, err = filepath.EvalSymlinks(kernelPath)
+				if err != nil {
+					return "", fmt.Errorf("Failed finding kernel: %w", err)
+				}
+			}
+
+			initrdPath = vmBootFiles.InitrdPath()
+			if initrdPath != "" {
+				initrdPath, err = filepath.EvalSymlinks(initrdPath)
+				if err != nil {
+					return "", fmt.Errorf("Failed finding initrd: %w", err)
+				}
+			}
+		}
+
 		execPath := util.GetExecPath()
 		execPathFull, err := filepath.EvalSymlinks(execPath)
 		if err == nil {
@@ -244,6 +270,8 @@ func instanceProfile(sysOS *sys.OS, inst instance) (string, error) {
 			"snap":              shared.InSnap(),
 			"userns":            sysOS.RunningInUserNS,
 			"firmwarePath":      firmwarePath,
+			"kernelPath":        kernelPath,
+			"initrdPath":        initrdPath,
 			"snapExtQemuPrefix": os.Getenv("SNAP_QEMU_PREFIX"),
 		})
 		if err != nil {
