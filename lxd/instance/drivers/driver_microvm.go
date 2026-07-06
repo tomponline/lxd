@@ -280,6 +280,11 @@ func (d *microvm) getKernelPath() string {
 	return kernelPath
 }
 
+// KernelPath returns the path to the kernel to use for booting.
+func (d *microvm) KernelPath() string {
+	return d.getKernelPath()
+}
+
 // getInitrdPath returns the path to the initrd to use for booting.
 func (d *microvm) getInitrdPath() string {
 	initrdPath := d.expandedConfig["microvm.initrd_path"]
@@ -301,6 +306,11 @@ func (d *microvm) getInitrdPath() string {
 	return initrdPath
 }
 
+// InitrdPath returns the path to the initrd to use for booting.
+func (d *microvm) InitrdPath() string {
+	return d.getInitrdPath()
+}
+
 // getKernelAppend returns additional kernel command line arguments.
 func (d *microvm) getKernelAppend() string {
 	return d.expandedConfig["microvm.kernel_append"]
@@ -319,6 +329,21 @@ func (d *microvm) getRuntime() string {
 // isCloudHypervisor returns true if the configured runtime is cloud-hypervisor.
 func (d *microvm) isCloudHypervisor() bool {
 	return d.getRuntime() == "ch"
+}
+
+// isLibkrun returns true if the configured runtime is libkrun.
+func (d *microvm) isLibkrun() bool {
+	return d.getRuntime() == "libkrun"
+}
+
+// libkrunPidFilePath returns the path to the libkrun helper PID file.
+func (d *microvm) libkrunPidFilePath() string {
+	return filepath.Join(d.LogPath(), "libkrun.pid")
+}
+
+// libkrunConsolePath returns the path to the libkrun console socket bridged by the helper.
+func (d *microvm) libkrunConsolePath() string {
+	return filepath.Join(d.LogPath(), "libkrun.console")
 }
 
 // chAPISocketPath returns the path to the cloud-hypervisor API socket.
@@ -646,6 +671,21 @@ func (d *microvm) Start(ctx context.Context, stateful bool, progressReporter iop
 				continue
 			}
 
+			// libkrun opens the host TAP device by name itself (inside the forklibkrun child),
+			// so LXD does not pre-open a TAP file descriptor for it. The TAP is also created as
+			// single-queue for libkrun, so opening it here with IFF_MULTI_QUEUE would fail.
+			if d.isLibkrun() {
+				nics = append(nics, microVMNIC{
+					devName: devName,
+					nicName: nicName,
+					hwaddr:  hwaddr,
+					mtu:     mtu,
+					tapFD:   -1,
+				})
+
+				continue
+			}
+
 			// Open TAP file handle using TUNSETIFF ioctl.
 			tapFile, err := os.OpenFile("/dev/net/tun", os.O_RDWR, 0)
 			if err != nil {
@@ -716,6 +756,10 @@ func (d *microvm) Start(ctx context.Context, stateful bool, progressReporter iop
 	// Dispatch to the appropriate hypervisor.
 	if d.isCloudHypervisor() {
 		return d.startCloudHypervisor(ctx, op, revert, kernelPath, initrdPath, rootDiskPath, nics, vsockID, memSizeMB, instUUID, kernelAppend, postStartHooks, fdFiles)
+	}
+
+	if d.isLibkrun() {
+		return d.startLibkrun(ctx, op, revert, kernelPath, initrdPath, rootDiskPath, nics, memSizeMB, kernelAppend, postStartHooks)
 	}
 
 	// Setup virtiofsd for the config drive mount path. The lxd-agent uses virtio-fs to access its
@@ -1028,6 +1072,127 @@ func (d *microvm) startCloudHypervisor(ctx context.Context, op *operationlock.In
 	return nil
 }
 
+// startLibkrun starts the MicroVM instance using libkrun via the forklibkrun helper subcommand.
+// libkrun's krun_start_enter() takes over the calling process and never returns, so it must run
+// in a dedicated child process rather than inside the LXD daemon.
+func (d *microvm) startLibkrun(ctx context.Context, op *operationlock.InstanceOperation, revert *revert.Reverter, kernelPath string, initrdPath string, rootDiskPath string, nics []microVMNIC, memSizeMB int64, kernelCmdline string, postStartHooks []func() error) error {
+	// Configure CPU count, default to 1.
+	cpuCount := d.expandedConfig["limits.cpu"]
+	if cpuCount == "" {
+		cpuCount = "1"
+	}
+
+	consolePath := d.libkrunConsolePath()
+
+	// Remove old console socket and PID file if they exist.
+	_ = os.Remove(consolePath)
+	_ = os.Remove(d.libkrunPidFilePath())
+
+	// Build the forklibkrun helper command.
+	forkArgs := []string{
+		"forklibkrun",
+		"--cpus", cpuCount,
+		"--memory", strconv.FormatInt(memSizeMB, 10),
+		"--kernel", kernelPath,
+		"--cmdline", kernelCmdline,
+		"--root-disk", rootDiskPath,
+		"--console", consolePath,
+		"--lxd-path", shared.VarPath(""),
+		"--project", d.project.Name,
+		"--instance", d.Name(),
+	}
+
+	if initrdPath != "" {
+		forkArgs = append(forkArgs, "--initrd", initrdPath)
+	}
+
+	// Add NIC configurations. libkrun's tap backend opens the host TAP device by name itself
+	// (inside the forklibkrun child, which runs as root), so the TAP device name and hardware
+	// address are passed through rather than a pre-opened file descriptor as used by QEMU and
+	// cloud-hypervisor. Interfaces appear in the guest as eth0, eth1, ... in the order added.
+	for _, nic := range nics {
+		forkArgs = append(forkArgs, "--net", fmt.Sprintf("%s,%s", nic.nicName, nic.hwaddr))
+	}
+
+	d.logger.Debug("Starting libkrun", logger.Ctx{"cmd": strings.Join(forkArgs, " ")})
+
+	// Setup the process using the subprocess package.
+	logFilePath := d.LogFilePath()
+	p, err := subprocess.NewProcess(d.state.OS.ExecPath, forkArgs, logFilePath, logFilePath)
+	if err != nil {
+		err = fmt.Errorf("Failed creating libkrun process: %w", err)
+		op.Done(err)
+		return err
+	}
+
+	err = p.Start(context.Background())
+	if err != nil {
+		err = fmt.Errorf("Failed starting libkrun: %w", err)
+		op.Done(err)
+		return err
+	}
+
+	pid := int(p.PID)
+
+	// Write PID file.
+	err = os.WriteFile(d.libkrunPidFilePath(), []byte(strconv.Itoa(pid)), 0640)
+	if err != nil {
+		_ = p.Stop()
+		err = fmt.Errorf("Failed writing PID file: %w", err)
+		op.Done(err)
+		return err
+	}
+
+	revert.Add(func() {
+		_ = p.Stop()
+	})
+
+	// Wait for the console socket to appear, indicating the helper has configured the VM.
+	ctxTimeout, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	for !shared.PathExists(consolePath) {
+		// Check if process exited early.
+		_, pidErr := p.GetPid()
+		if pidErr != nil {
+			logContent, _ := os.ReadFile(logFilePath)
+			err = fmt.Errorf("libkrun process exited unexpectedly\nLog: %s", string(logContent))
+			op.Done(err)
+			return err
+		}
+
+		select {
+		case <-ctxTimeout.Done():
+			err = fmt.Errorf("Timed out waiting for libkrun console socket: %w", ctxTimeout.Err())
+			op.Done(err)
+			return err
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+
+	// Record last state.
+	err = d.recordLastState()
+	if err != nil {
+		op.Done(err)
+		return err
+	}
+
+	// Run any post-start hooks.
+	err = d.runHooks(postStartHooks)
+	if err != nil {
+		op.Done(err)
+		return err
+	}
+
+	d.state.Events.SendLifecycle(d.project.Name, lifecycle.InstanceStarted.Event(ctx, d, nil))
+
+	revert.Success()
+
+	d.logger.Info("Started libkrun instance", logger.Ctx{"pid": pid})
+
+	return nil
+}
+
 // killCloudHypervisorProcess kills the cloud-hypervisor process by PID.
 func (d *microvm) killCloudHypervisorProcess(pid int) error {
 	proc, err := os.FindProcess(pid)
@@ -1133,10 +1298,87 @@ func (d *microvm) chPid() (int, error) {
 	return pid, nil
 }
 
+// libkrunPid gets the PID of the running libkrun helper process. Returns 0 if PID file or process not found.
+func (d *microvm) libkrunPid() (int, error) {
+	pidStr, err := os.ReadFile(d.libkrunPidFilePath())
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, nil
+		}
+
+		return -1, err
+	}
+
+	pid, err := strconv.Atoi(strings.TrimSpace(string(pidStr)))
+	if err != nil {
+		return -1, err
+	}
+
+	// Check if the process is still running and is the libkrun helper.
+	cmdLineProcFilePath := fmt.Sprintf("/proc/%d/cmdline", pid)
+	cmdLine, err := os.ReadFile(cmdLineProcFilePath)
+	if err != nil {
+		return 0, nil // Process has gone.
+	}
+
+	if !bytes.Contains(cmdLine, []byte("forklibkrun")) {
+		return -1, errors.New("PID does not match a libkrun process")
+	}
+
+	return pid, nil
+}
+
+// stopLibkrun stops a libkrun instance by terminating the helper process.
+// libkrun has no external control channel, so the VM is stopped by killing the helper.
+func (d *microvm) stopLibkrun(ctx context.Context, op *operationlock.InstanceOperation) error {
+	pid, _ := d.libkrunPid()
+	if pid > 0 {
+		err := d.killCloudHypervisorProcess(pid)
+		if err != nil {
+			d.logger.Warn("Failed to kill libkrun process", logger.Ctx{"err": err})
+		}
+
+		// Wait up to 30 seconds for the process to exit.
+		ctxTimeout, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		for d.processExists(pid) {
+			select {
+			case <-ctxTimeout.Done():
+				d.logger.Warn("Timed out waiting for libkrun to exit")
+			case <-time.After(100 * time.Millisecond):
+				continue
+			}
+
+			break
+		}
+	}
+
+	// Clean up PID file and console socket.
+	_ = os.Remove(d.libkrunPidFilePath())
+	_ = os.Remove(d.libkrunConsolePath())
+
+	// Wait for onStop to complete device cleanup.
+	err := d.onStop(ctx, "stop")
+	if err != nil {
+		op.Done(err)
+		return err
+	}
+
+	d.state.Events.SendLifecycle(d.project.Name, lifecycle.InstanceStopped.Event(ctx, d, nil))
+
+	op.Done(nil)
+	return nil
+}
+
 // pid overrides the qemu pid method to handle cloud-hypervisor.
 func (d *microvm) pid() (int, error) {
 	if d.isCloudHypervisor() {
 		return d.chPid()
+	}
+
+	if d.isLibkrun() {
+		return d.libkrunPid()
 	}
 
 	return d.qemu.pid()
@@ -1178,6 +1420,20 @@ func (d *microvm) statusCode() api.StatusCode {
 			default:
 				return api.Error
 			}
+		}
+
+		return api.Stopped
+	}
+
+	if d.isLibkrun() {
+		// For libkrun, there is no control channel, so status is derived from the helper process.
+		pid, _ := d.libkrunPid()
+		if pid > 0 {
+			if shared.IsTrue(d.LocalConfig()["volatile.last_state.ready"]) {
+				return api.Ready
+			}
+
+			return api.Running
 		}
 
 		return api.Stopped
@@ -1346,8 +1602,11 @@ func (d *microvm) RenderState(_ []net.Interface, opts ...instance.StateRenderOpt
 
 // Console overrides the qemu Console method to handle cloud-hypervisor console path.
 func (d *microvm) Console(ctx context.Context, protocol string) (*os.File, chan error, error) {
-	if d.isCloudHypervisor() && protocol == instance.ConsoleTypeConsole {
+	if (d.isCloudHypervisor() || d.isLibkrun()) && protocol == instance.ConsoleTypeConsole {
 		path := d.chConsolePath()
+		if d.isLibkrun() {
+			path = d.libkrunConsolePath()
+		}
 
 		// Disconnection notification.
 		chDisconnect := make(chan error, 1)
@@ -1628,6 +1887,10 @@ func (d *microvm) Stop(ctx context.Context, stateful bool) error {
 	// Dispatch to the appropriate hypervisor stop method.
 	if d.isCloudHypervisor() {
 		return d.stopCloudHypervisor(ctx, op)
+	}
+
+	if d.isLibkrun() {
+		return d.stopLibkrun(ctx, op)
 	}
 
 	// Connect to the monitor.

@@ -3652,4 +3652,4 @@ Adds support for using cloud-hypervisor as an alternative hypervisor runtime for
 
 This extension adds the following instance configuration key:
 
-* {config:option}`instance-microvm:microvm.runtime` - The hypervisor runtime to use (`qemu` or `ch`). Defaults to `qemu`.
+* {config:option}`instance-microvm:microvm.runtime` - The hypervisor runtime to use (`qemu`, `ch` or `libkrun`). Defaults to `qemu`.

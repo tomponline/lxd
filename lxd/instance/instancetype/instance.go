@@ -1222,8 +1222,8 @@ var InstanceConfigKeysMicroVM = map[string]func(value string) error{
 	//  defaultdesc: `qemu`
 	//  liveupdate: no
 	//  condition: microvm
-	//  shortdesc: Hypervisor runtime (`qemu` or `ch`)
-	"microvm.runtime": validate.Optional(validate.IsOneOf("qemu", "ch")),
+	//  shortdesc: Hypervisor runtime (`qemu`, `ch` or `libkrun`)
+	"microvm.runtime": validate.Optional(validate.IsOneOf("qemu", "ch", "libkrun")),
 }
 
 // ConfigKeyChecker returns a function that will check whether or not

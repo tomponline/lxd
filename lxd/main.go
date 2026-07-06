@@ -134,6 +134,10 @@ func main() {
 	forklimitsCmd := cmdForklimits{global: &globalCmd}
 	app.AddCommand(forklimitsCmd.command())
 
+	// forklibkrun sub-command
+	forklibkrunCmd := cmdForklibkrun{global: &globalCmd}
+	app.AddCommand(forklibkrunCmd.command())
+
 	// forkmigrate sub-command
 	forkmigrateCmd := cmdForkmigrate{global: &globalCmd}
 	app.AddCommand(forkmigrateCmd.command())
