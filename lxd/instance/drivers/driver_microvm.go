@@ -341,6 +341,15 @@ func (d *microvm) chConsolePath() string {
 	return filepath.Join(d.LogPath(), "ch.console")
 }
 
+// configVirtiofsdPaths returns the path for the socket and PID file to use with the config drive virtiofsd process.
+func (d *microvm) configVirtiofsdPaths() (sockPath string, pidPath string) {
+	logPath := d.LogPath()
+	sockPath = filepath.Join(logPath, "virtio-fs.config.sock")
+	pidPath = filepath.Join(logPath, "virtiofsd.pid")
+
+	return sockPath, pidPath
+}
+
 // Start starts the MicroVM instance using QEMU's microvm machine type with direct kernel boot.
 func (d *microvm) Start(ctx context.Context, stateful bool, progressReporter ioprogress.ProgressReporter) error {
 	unlock, err := d.updateBackupFileLock(context.Background())
@@ -587,10 +596,6 @@ func (d *microvm) Start(ctx context.Context, stateful bool, progressReporter iop
 		return err
 	}
 
-	// Note: virtiofs (vhost-user-fs) is not currently supported for microvm because the vhost-user
-	// protocol has compatibility issues with the virtio-mmio transport used by microvm. The lxd-agent
-	// will use 9p for the config drive instead.
-
 	// Get qemu path for this architecture.
 	qemuPath, _, err := d.qemuArchConfig(d.architecture)
 	if err != nil {
@@ -699,7 +704,11 @@ func (d *microvm) Start(ctx context.Context, stateful bool, progressReporter iop
 	memSizeMB := memSizeBytes / 1024 / 1024
 
 	// Build kernel command line.
-	kernelAppend := "console=ttyS0 root=/dev/vda rw"
+	// The microvm machine type has no legacy ISA 8250 UART, so the console must use the
+	// virtio-console (hvc0) device wired up in generateMicroVMConfigFile. Avoid earlyprintk=virtio
+	// (not a valid earlyprintk backend) and avoid reboot=t/panic=-1, which would silently
+	// triple-fault reboot-loop (100% CPU, no output) if the guest panics before hvc0 comes up.
+	kernelAppend := "console=hvc0 root=/dev/vda rootfstype=ext4 rw"
 	if extraAppend := d.getKernelAppend(); extraAppend != "" {
 		kernelAppend = kernelAppend + " " + extraAppend
 	}
@@ -709,8 +718,23 @@ func (d *microvm) Start(ctx context.Context, stateful bool, progressReporter iop
 		return d.startCloudHypervisor(ctx, op, revert, kernelPath, initrdPath, rootDiskPath, nics, vsockID, memSizeMB, instUUID, kernelAppend, postStartHooks, fdFiles)
 	}
 
+	// Setup virtiofsd for the config drive mount path. The lxd-agent uses virtio-fs to access its
+	// configuration and certificates. There is no 9p fallback for microvm.
+	configSockPath, configPIDPath := d.configVirtiofsdPaths()
+	virtiofsdRevert, unixListener, err := device.DiskVMVirtiofsdStart(d, configSockPath, configPIDPath, "", configMntPath, nil, 0)
+	if err != nil {
+		err = fmt.Errorf("Failed setting up virtiofsd for config drive: %w", err)
+		op.Done(err)
+		return err
+	}
+
+	revert.Add(virtiofsdRevert)
+
+	// Request the unix listener is closed after QEMU has connected on startup.
+	defer func() { _ = unixListener.Close() }()
+
 	// Generate MicroVM QEMU config.
-	confFile, err := d.generateMicroVMConfigFile(vsockFD, rootDiskPath, configMntPath, nics, &fdFiles)
+	confFile, err := d.generateMicroVMConfigFile(vsockFD, rootDiskPath, configSockPath, memSizeMB, nics, &fdFiles)
 	if err != nil {
 		op.Done(err)
 		return err
@@ -726,7 +750,6 @@ func (d *microvm) Start(ctx context.Context, stateful bool, progressReporter iop
 		"-daemonize",
 		"-cpu", "host",
 		"-nographic",
-		"-serial", "chardev:console",
 		"-nodefaults",
 		"-no-user-config",
 		"-sandbox", "on,obsolete=deny,elevateprivileges=allow,spawn=allow,resourcecontrol=deny",
@@ -1360,7 +1383,7 @@ type microVMNIC struct {
 }
 
 // generateMicroVMConfigFile generates a QEMU config file for microvm machine type.
-func (d *microvm) generateMicroVMConfigFile(vsockFD int, rootDiskPath string, configDrivePath string, nics []microVMNIC, fdFiles *[]*os.File) (string, error) {
+func (d *microvm) generateMicroVMConfigFile(vsockFD int, rootDiskPath string, configSockPath string, memSizeMB int64, nics []microVMNIC, fdFiles *[]*os.File) (string, error) {
 	cfg := make([]cfgSection, 0, 16+len(nics)*2)
 
 	// Machine configuration for microvm.
@@ -1373,6 +1396,27 @@ func (d *microvm) generateMicroVMConfigFile(vsockFD int, rootDiskPath string, co
 			{key: "pit", value: "off"},
 			{key: "pic", value: "off"},
 			{key: "rtc", value: "on"},
+			// The guest kernel is built without ACPI support, so disable ACPI and rely on
+			// microvm's auto-kernel-cmdline (on by default), which appends the
+			// virtio_mmio.device=<size>@<base>:<irq> entries the guest needs to discover its
+			// virtio-mmio devices (root disk, console). With acpi=on the device topology is only
+			// described via ACPI tables that a non-ACPI guest ignores, leaving it unable to find
+			// its root disk/console and spinning at 100% CPU with no output.
+			{key: "acpi", value: "off"},
+			// Back guest RAM with a shared memfd so the vhost-user-fs (virtio-fs) config drive
+			// device can map guest memory. vhost-user requires a shared memory backend.
+			{key: "memory-backend", value: "mem0"},
+		},
+	})
+
+	// Shared memory backend required by the vhost-user-fs (virtio-fs) config drive device.
+	cfg = append(cfg, cfgSection{
+		name:    `object "mem0"`,
+		comment: "Shared memory",
+		entries: []cfgEntry{
+			{key: "qom-type", value: "memory-backend-memfd"},
+			{key: "size", value: fmt.Sprintf("%dM", memSizeMB)},
+			{key: "share", value: "on"},
 		},
 	})
 
@@ -1413,6 +1457,18 @@ func (d *microvm) generateMicroVMConfigFile(vsockFD int, rootDiskPath string, co
 		},
 	})
 
+	// Virtio console attached to the virtio-serial bus. This provides the hvc0 device that the
+	// kernel command line (console=hvc0) uses for the system console, as the microvm machine type
+	// has no legacy ISA serial port.
+	cfg = append(cfg, cfgSection{
+		name:    `device "console"`,
+		comment: "Console",
+		entries: []cfgEntry{
+			{key: "driver", value: "virtconsole"},
+			{key: "chardev", value: "console"},
+		},
+	})
+
 	cfg = append(cfg, cfgSection{
 		name:    `device "qemu_serial"`,
 		comment: "LXD serial port",
@@ -1433,25 +1489,24 @@ func (d *microvm) generateMicroVMConfigFile(vsockFD int, rootDiskPath string, co
 		},
 	})
 
-	// Config drive using 9p for sharing lxd-agent and certificates.
+	// Config drive shared via virtio-fs (vhost-user-fs) for sharing lxd-agent and certificates.
+	// The socket is backed by a virtiofsd process started during instance start.
 	cfg = append(cfg, cfgSection{
-		name:    `fsdev "dev-qemu_config-drive-9p"`,
-		comment: "Config drive (9p)",
+		name:    `chardev "dev-qemu_config-drive-virtio-fs"`,
+		comment: "Config drive (virtio-fs)",
 		entries: []cfgEntry{
-			{key: "fsdriver", value: "local"},
-			{key: "security_model", value: "none"},
-			{key: "readonly", value: "on"},
-			{key: "path", value: configDrivePath},
+			{key: "backend", value: "socket"},
+			{key: "path", value: configSockPath},
 		},
 	})
 
 	cfg = append(cfg, cfgSection{
-		name:    `device "dev-qemu_config-drive-9p"`,
+		name:    `device "dev-qemu_config-drive-virtio-fs"`,
 		comment: "Config drive device",
 		entries: []cfgEntry{
-			{key: "driver", value: "virtio-9p-device"},
-			{key: "mount_tag", value: "config"},
-			{key: "fsdev", value: "dev-qemu_config-drive-9p"},
+			{key: "driver", value: "vhost-user-fs-device"},
+			{key: "tag", value: "config"},
+			{key: "chardev", value: "dev-qemu_config-drive-virtio-fs"},
 		},
 	})
 
