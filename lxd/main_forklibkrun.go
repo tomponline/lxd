@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/spf13/cobra"
 
@@ -241,6 +242,36 @@ func (c *cmdForklibkrun) run(_ *cobra.Command, _ []string) error {
 		return fmt.Errorf("Failed creating console socket %q: %w", c.flagConsolePath, err)
 	}
 
+	var consoleConnMu sync.Mutex
+	var consoleConn net.Conn
+
+	// Always drain the PTY master so guest writes never block when no client is attached.
+	go func() {
+		buf := make([]byte, 32768)
+		for {
+			n, err := ptx.Read(buf)
+			if err != nil {
+				return
+			}
+
+			consoleConnMu.Lock()
+			conn := consoleConn
+			consoleConnMu.Unlock()
+
+			if conn != nil {
+				_, err = conn.Write(buf[:n])
+				if err != nil {
+					consoleConnMu.Lock()
+					if consoleConn == conn {
+						_ = consoleConn.Close()
+						consoleConn = nil
+					}
+					consoleConnMu.Unlock()
+				}
+			}
+		}
+	}()
+
 	go func() {
 		for {
 			conn, err := listener.Accept()
@@ -248,13 +279,24 @@ func (c *cmdForklibkrun) run(_ *cobra.Command, _ []string) error {
 				return
 			}
 
-			go func() {
-				defer func() { _ = conn.Close() }()
+			consoleConnMu.Lock()
+			if consoleConn != nil {
+				_ = consoleConn.Close()
+			}
 
-				// Copy console output to the client and client input to the console.
-				go func() { _, _ = io.Copy(conn, ptx) }()
+			consoleConn = conn
+			consoleConnMu.Unlock()
+
+			go func(conn net.Conn) {
 				_, _ = io.Copy(ptx, conn)
-			}()
+
+				consoleConnMu.Lock()
+				if consoleConn == conn {
+					_ = consoleConn.Close()
+					consoleConn = nil
+				}
+				consoleConnMu.Unlock()
+			}(conn)
 		}
 	}()
 
