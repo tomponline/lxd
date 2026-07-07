@@ -110,6 +110,7 @@ func api10Put(d *Daemon, r *http.Request) response.Response {
 
 	server, err := lxd.ConnectLXDHTTP(args, client)
 	if err != nil {
+		logger.Error("Failed connecting to LXD", logger.Ctx{"err": err, "serverCID": d.serverCID, "serverPort": d.serverPort})
 		return response.ErrorResponse(http.StatusInternalServerError, err.Error())
 	}
 
@@ -124,6 +125,7 @@ func api10Put(d *Daemon, r *http.Request) response.Response {
 	// confirm the DevLXD is actually accessible.
 	_, _, err = server.GetServer()
 	if err != nil && !api.StatusErrorCheck(err, http.StatusForbidden) {
+		logger.Error("Failed verifying connection to LXD server", logger.Ctx{"err": err, "serverCID": d.serverCID, "serverPort": d.serverPort})
 		return response.SmartError(fmt.Errorf("Failed verifying connection to LXD server: %w", err))
 	}
 
