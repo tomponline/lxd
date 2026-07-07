@@ -172,13 +172,14 @@ func (e *Endpoints) up(config *Config) error {
 	defer e.mu.Unlock()
 
 	e.servers = map[kind]*http.Server{
-		cluster: config.RestServer,
-		devlxd:  config.DevLxdServer,
-		local:   config.RestServer,
-		metrics: config.MetricsServer,
-		network: config.RestServer,
-		pprof:   pprofCreateServer(),
-		vmvsock: config.VsockServer,
+		cluster:     config.RestServer,
+		devlxd:      config.DevLxdServer,
+		local:       config.RestServer,
+		metrics:     config.MetricsServer,
+		network:     config.RestServer,
+		pprof:       pprofCreateServer(),
+		vmvsock:     config.VsockServer,
+		vmvsockunix: config.VsockServer,
 	}
 
 	e.cert = config.Cert
@@ -216,6 +217,11 @@ func (e *Endpoints) up(config *Config) error {
 	// Start the VM sock listener.
 	if config.VsockSupport {
 		e.listeners[vmvsock], err = createVsockListener(e.cert)
+		if err != nil {
+			return err
+		}
+
+		e.listeners[vmvsockunix], err = createVsockUnixListener(config.Dir, e.cert)
 		if err != nil {
 			return err
 		}
@@ -378,6 +384,13 @@ func (e *Endpoints) Down() error {
 		}
 	}
 
+	if e.listeners[vmvsockunix] != nil {
+		err := e.closeListener(vmvsockunix)
+		if err != nil {
+			return err
+		}
+	}
+
 	if e.tomb != nil {
 		e.tomb.Kill(nil)
 		_ = e.tomb.Wait()
@@ -468,15 +481,17 @@ const (
 	cluster
 	metrics
 	vmvsock
+	vmvsockunix
 )
 
 // Human-readable descriptions of the various kinds of endpoints.
 var descriptions = map[kind]string{
-	local:   "REST API Unix socket",
-	devlxd:  "devlxd socket",
-	network: "REST API TCP socket",
-	pprof:   "pprof socket",
-	cluster: "cluster socket",
-	metrics: "metrics socket",
-	vmvsock: "VM socket",
+	local:       "REST API Unix socket",
+	devlxd:      "devlxd socket",
+	network:     "REST API TCP socket",
+	pprof:       "pprof socket",
+	cluster:     "cluster socket",
+	metrics:     "metrics socket",
+	vmvsock:     "VM socket",
+	vmvsockunix: "VM unix socket",
 }

@@ -5,8 +5,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
@@ -20,6 +22,7 @@ import (
 	"github.com/kballard/go-shellquote"
 	"golang.org/x/sys/unix"
 
+	lxd "github.com/canonical/lxd/client"
 	"github.com/canonical/lxd/lxd/apparmor"
 	"github.com/canonical/lxd/lxd/db"
 	"github.com/canonical/lxd/lxd/device"
@@ -54,6 +57,22 @@ var (
 	libkrunWatchers     = map[string]int{}
 	libkrunWatchersLock sync.Mutex
 )
+
+// libkrunVsockProxy is a single shared unix socket proxy that accepts connections from libkrun
+// guest agents (agent→LXD direction) and forwards them to LXD's dedicated VM unix socket
+// listener. All libkrun VMs on a host share this one listener; the TLS certificate carried
+// inside each connection identifies the individual VM to the LXD daemon, matching the behaviour
+// of native kernel vsock used by QEMU and cloud-hypervisor VMs.
+var (
+	libkrunVsockProxyOnce   sync.Once
+	libkrunVsockProxySocket string // absolute path of the shared unix socket
+)
+
+// libkrunVsockProxyPort is the guest-facing vsock port intercepted by libkrun
+// and forwarded to the shared unix proxy socket on the host (agent→LXD path).
+// Keep this stable and non-reserved so the guest never depends on host-side
+// dynamic vsock endpoint ports.
+const libkrunVsockProxyPort uint32 = 8444
 
 // microvmLoad creates a MicroVM instance from the supplied InstanceArgs.
 func microvmLoad(s *state.State, args db.InstanceArgs, p api.Project) (instance.Instance, error) {
@@ -356,6 +375,78 @@ func (d *microvm) libkrunPidFilePath() string {
 // libkrunConsolePath returns the path to the libkrun console socket bridged by the helper.
 func (d *microvm) libkrunConsolePath() string {
 	return filepath.Join(d.LogPath(), "libkrun.console")
+}
+
+// libkrunAgentSocketPath returns the per-VM unix socket path that libkrun creates for the
+// LXD→agent vsock bridge. The forklibkrun helper passes this to libkrun's AddVsockPort2 so
+// that the LXD daemon can connect here to reach the in-guest lxd-agent.
+func (d *microvm) libkrunAgentSocketPath() string {
+	return filepath.Join(d.LogPath(), "libkrun.agent.sock")
+}
+
+// ensureLibkrunVsockProxy starts the shared unix socket proxy for agent→LXD vsock
+// traffic exactly once per daemon lifetime. It returns the socket path and the vsock port
+// that forklibkrun should tell guests to dial. If the LXD vsock endpoint is not available
+// it returns empty strings and a zero port.
+func (d *microvm) ensureLibkrunVsockProxy() (socketPath string, guestProxyPort uint32) {
+	vsockUnixSocket := shared.VarPath("vsock-unix.socket")
+	if !shared.PathExists(vsockUnixSocket) {
+		d.logger.Warn("LXD VM unix socket not available; libkrun agent→LXD proxy not started", logger.Ctx{"path": vsockUnixSocket})
+		return "", 0
+	}
+
+	libkrunVsockProxyOnce.Do(func() {
+		socketPath := shared.VarPath("libkrun-vsock-proxy.sock")
+		_ = os.Remove(socketPath)
+
+		ln, err := net.Listen("unix", socketPath)
+		if err != nil {
+			d.logger.Error("Failed creating libkrun vsock proxy socket", logger.Ctx{"path": socketPath, "err": err})
+			return
+		}
+
+		libkrunVsockProxySocket = socketPath
+
+		d.logger.Debug("Started libkrun vsock proxy", logger.Ctx{"socket": socketPath, "backend": vsockUnixSocket})
+
+		go func() {
+			for {
+				conn, err := ln.Accept()
+				if err != nil {
+					return
+				}
+
+				go libkrunVsockProxyBridge(conn, vsockUnixSocket)
+			}
+		}()
+	})
+
+	return libkrunVsockProxySocket, libkrunVsockProxyPort
+}
+
+// libkrunVsockProxyBridge proxies a single connection from a libkrun guest agent to
+// LXD's VM unix socket listener, which is already a native TLS endpoint.
+func libkrunVsockProxyBridge(conn net.Conn, vsockUnixSocket string) {
+	defer func() { _ = conn.Close() }()
+
+	unixConn, err := net.Dial("unix", vsockUnixSocket)
+	if err != nil {
+		return
+	}
+
+	defer func() { _ = unixConn.Close() }()
+
+	done := make(chan struct{}, 2)
+	go func() {
+		_, _ = io.Copy(unixConn, conn)
+		done <- struct{}{}
+	}()
+	go func() {
+		_, _ = io.Copy(conn, unixConn)
+		done <- struct{}{}
+	}()
+
+	<-done
 }
 
 // chAPISocketPath returns the path to the cloud-hypervisor API socket.
@@ -1100,6 +1191,19 @@ func (d *microvm) startLibkrun(ctx context.Context, op *operationlock.InstanceOp
 	_ = os.Remove(consolePath)
 	_ = os.Remove(d.libkrunPidFilePath())
 
+	// Set up vsock for lxd-agent connectivity.
+	// Load vhost_vsock so the proxy goroutine can use vsock loopback to reach the LXD
+	// vsock server from the host side (agent→LXD direction).
+	err := util.LoadModule("vhost_vsock")
+	if err != nil {
+		d.logger.Warn("Failed loading vhost_vsock module; lxd-agent vsock connectivity may be unavailable", logger.Ctx{"err": err})
+	}
+
+	agentSocketPath := d.libkrunAgentSocketPath()
+	_ = os.Remove(agentSocketPath)
+
+	lxdProxySocket, guestProxyPort := d.ensureLibkrunVsockProxy()
+
 	// Build the forklibkrun helper command.
 	forkArgs := []string{
 		"forklibkrun",
@@ -1117,6 +1221,15 @@ func (d *microvm) startLibkrun(ctx context.Context, op *operationlock.InstanceOp
 
 	if initrdPath != "" {
 		forkArgs = append(forkArgs, "--initrd", initrdPath)
+	}
+
+	// Pass vsock socket paths when the proxy is available.
+	if lxdProxySocket != "" && guestProxyPort != 0 {
+		forkArgs = append(forkArgs,
+			"--vsock-agent-socket", agentSocketPath,
+			"--vsock-lxd-port", strconv.FormatUint(uint64(guestProxyPort), 10),
+			"--vsock-lxd-socket", lxdProxySocket,
+		)
 	}
 
 	// Add NIC configurations. libkrun's tap backend opens the host TAP device by name itself
@@ -1207,6 +1320,91 @@ func (d *microvm) startLibkrun(ctx context.Context, op *operationlock.InstanceOp
 	revert.Success()
 
 	d.logger.Info("Started libkrun instance", logger.Ctx{"pid": pid})
+
+	// Start the agent readiness poller in the background. There is no QMP control channel
+	// for libkrun, so we poll the agent unix socket until the lxd-agent accepts a TLS
+	// connection, then advertise the LXD vsock address so the agent can connect back.
+	if lxdProxySocket != "" && guestProxyPort != 0 {
+		go d.waitForLibkrunAgent(agentSocketPath, guestProxyPort)
+	}
+
+	return nil
+}
+
+// waitForLibkrunAgent polls the per-VM agent unix socket until the lxd-agent inside the
+// libkrun VM has started and is accepting TLS connections, then advertises the LXD vsock
+// address so the agent can initiate its own connection back (devlxd etc.).
+// This replaces the QMP EventAgentStarted→advertiseVsockAddress path used by QEMU.
+func (d *microvm) waitForLibkrunAgent(agentSocketPath string, lxdVsockPort uint32) {
+	const (
+		pollInterval = 5 * time.Second
+		pollTimeout  = 3 * time.Minute
+	)
+
+	deadline := time.Now().Add(pollTimeout)
+
+	for time.Now().Before(deadline) {
+		// The agent socket is created by libkrun when the VM starts, but the agent only
+		// begins accepting connections once it has fully initialised inside the guest.
+		// A successful net.Dial proves libkrun's side is up; a successful TLS handshake
+		// (done inside libkrunAgentHTTPClient → ConnectLXDHTTPWithContext) proves the
+		// agent itself is ready.
+		_, err := net.DialTimeout("unix", agentSocketPath, time.Second)
+		if err != nil {
+			time.Sleep(pollInterval)
+			continue
+		}
+
+		err = d.libkrunAdvertiseVsockAddress(lxdVsockPort)
+		if err != nil {
+			d.logger.Warn("Failed to advertise vsock address to libkrun agent, retrying", logger.Ctx{"err": err})
+			time.Sleep(pollInterval)
+			continue
+		}
+
+		d.logger.Debug("lxd-agent ready in libkrun VM")
+		return
+	}
+
+	d.logger.Warn("Timed out waiting for lxd-agent to become ready in libkrun VM")
+}
+
+// libkrunAdvertiseVsockAddress sends the LXD vsock CID and port to lxd-agent so
+// the agent can connect back to the LXD daemon for devlxd and server-initiated operations.
+func (d *microvm) libkrunAdvertiseVsockAddress(lxdVsockPort uint32) error {
+	httpClient, err := d.getAgentClient()
+	if err != nil {
+		return fmt.Errorf("Failed getting agent client: %w", err)
+	}
+
+	connectCtx, cancel := context.WithTimeout(context.Background(), agentConnectTimeout)
+	defer cancel()
+
+	agent, err := lxd.ConnectLXDHTTPWithContext(connectCtx, nil, httpClient)
+	if err != nil {
+		return fmt.Errorf("Failed connecting to lxd-agent: %w", err)
+	}
+
+	defer agent.Disconnect()
+
+	connInfo, err := d.getAgentConnectionInfo()
+	if err != nil {
+		return err
+	}
+
+	if connInfo == nil {
+		return nil
+	}
+
+	// Override the port with the vsock port that libkrun will bridge to the shared proxy.
+	// The CID remains vsock.Host (2) since that is what the guest's kernel expects for the
+	// hypervisor/host, and libkrun intercepts vsock.Dial(2, lxdVsockPort) via AddVsockPort.
+	connInfo.Port = lxdVsockPort
+
+	_, _, err = agent.RawQuery(http.MethodPut, "/1.0", connInfo, "")
+	if err != nil {
+		return fmt.Errorf("Failed sending vsock address to lxd-agent: %w", err)
+	}
 
 	return nil
 }
@@ -1471,9 +1669,10 @@ func (d *microvm) stopLibkrun(ctx context.Context, op *operationlock.InstanceOpe
 		}
 	}
 
-	// Clean up PID file and console socket.
+	// Clean up PID file, console socket, and per-VM agent socket.
 	_ = os.Remove(d.libkrunPidFilePath())
 	_ = os.Remove(d.libkrunConsolePath())
+	_ = os.Remove(d.libkrunAgentSocketPath())
 
 	// Wait for onStop to complete device cleanup.
 	err := d.onStop(ctx, "stop")

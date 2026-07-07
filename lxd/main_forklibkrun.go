@@ -32,6 +32,16 @@ type cmdForklibkrun struct {
 	flagLXDPath     string
 	flagProject     string
 	flagInstance    string
+
+	// Vsock flags for lxd-agent connectivity.
+	// flagVsockAgentSocket is the unix socket path libkrun creates so LXD can
+	// connect to the guest's vsock agent listener (LXD→agent direction).
+	// flagVsockLxdPort is the vsock port number that the guest agent dials to
+	// reach the LXD vsock server (agent→LXD direction); libkrun intercepts this
+	// and forwards to flagVsockLxdSocket on the host.
+	flagVsockAgentSocket string
+	flagVsockLxdPort     uint
+	flagVsockLxdSocket   string
 }
 
 func (c *cmdForklibkrun) command() *cobra.Command {
@@ -63,6 +73,10 @@ func (c *cmdForklibkrun) command() *cobra.Command {
 	cmd.Flags().StringVar(&c.flagLXDPath, "lxd-path", "", "Path to LXD state directory for stop callback")
 	cmd.Flags().StringVar(&c.flagProject, "project", "", "Instance project for stop callback")
 	cmd.Flags().StringVar(&c.flagInstance, "instance", "", "Instance name for stop callback")
+
+	cmd.Flags().StringVar(&c.flagVsockAgentSocket, "vsock-agent-socket", "", "Unix socket path for LXD→agent vsock bridge (optional)")
+	cmd.Flags().UintVar(&c.flagVsockLxdPort, "vsock-lxd-port", 0, "Vsock port the guest agent dials to reach LXD (optional)")
+	cmd.Flags().StringVar(&c.flagVsockLxdSocket, "vsock-lxd-socket", "", "Unix socket path for agent→LXD vsock bridge (optional)")
 
 	return cmd
 }
@@ -267,6 +281,29 @@ func (c *cmdForklibkrun) run(_ *cobra.Command, _ []string) error {
 	err = ctx.AddVirtioFS3("config", c.flagConfigDrive, 0, true)
 	if err != nil {
 		return fmt.Errorf("Failed configuring config drive virtio-fs: %w", err)
+	}
+
+	// Wire vsock for lxd-agent connectivity when the caller has provided socket paths.
+	// AddVsock adds a virtio-vsock device (no TSI/transparent socket impersonation).
+	// AddVsockPort2 creates a unix socket that libkrun listens on; when the LXD daemon
+	// connects to it the traffic is bridged to the guest vsock port (LXD→agent).
+	// AddVsockPort intercepts guest vsock connections on lxdPort and forwards them to
+	// a unix socket on the host where the LXD vsock proxy listens (agent→LXD).
+	if c.flagVsockAgentSocket != "" && c.flagVsockLxdPort != 0 && c.flagVsockLxdSocket != "" {
+		err = ctx.AddVsock(0)
+		if err != nil {
+			return fmt.Errorf("Failed adding vsock device: %w", err)
+		}
+
+		err = ctx.AddVsockPort2(shared.HTTPSDefaultPort, c.flagVsockAgentSocket, true)
+		if err != nil {
+			return fmt.Errorf("Failed adding vsock agent port: %w", err)
+		}
+
+		err = ctx.AddVsockPort(uint32(c.flagVsockLxdPort), c.flagVsockLxdSocket)
+		if err != nil {
+			return fmt.Errorf("Failed adding vsock LXD port: %w", err)
+		}
 	}
 
 	// Add network interfaces backed by host TAP devices. libkrun opens the named TAP device
