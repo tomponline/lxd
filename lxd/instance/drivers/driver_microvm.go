@@ -1108,6 +1108,7 @@ func (d *microvm) startLibkrun(ctx context.Context, op *operationlock.InstanceOp
 		"--kernel", kernelPath,
 		"--cmdline", kernelCmdline,
 		"--root-disk", rootDiskPath,
+		"--config-drive", d.configDriveMountPath(),
 		"--console", consolePath,
 		"--lxd-path", shared.VarPath(""),
 		"--project", d.project.Name,
