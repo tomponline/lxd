@@ -29,7 +29,8 @@ var servers = make(map[string]*http.Server, 2)
 var errChan = make(chan error)
 
 type cmdAgent struct {
-	global *cmdGlobal
+	global        *cmdGlobal
+	statusVSerial *os.File
 }
 
 // Command line for lxd-agent.
@@ -193,6 +194,11 @@ func (c *cmdAgent) startStatusNotifier(ctx context.Context, chConnected <-chan s
 	cancel := func() {
 		exit()    // Signal for the go routine to end.
 		wg.Wait() // Wait for the go routine to actually finish.
+
+		if c.statusVSerial != nil {
+			_ = c.statusVSerial.Close()
+			c.statusVSerial = nil
+		}
 	}
 
 	wg.Go(func() {
@@ -217,19 +223,24 @@ func (c *cmdAgent) startStatusNotifier(ctx context.Context, chConnected <-chan s
 
 // writeStatus writes a status code to the vserial ring buffer used to detect agent status on host.
 func (c *cmdAgent) writeStatus(status string) error {
-	vSerial, err := os.OpenFile("/dev/virtio-ports/com.canonical.lxd", os.O_RDWR, 0600)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil
+	if c.statusVSerial == nil {
+		vSerial, err := os.OpenFile("/dev/virtio-ports/com.canonical.lxd", os.O_RDWR, 0600)
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil
+			}
+
+			return err
 		}
 
-		return err
+		c.statusVSerial = vSerial
 	}
 
-	defer vSerial.Close()
-
-	_, err = vSerial.Write([]byte(status + "\n"))
+	_, err := c.statusVSerial.Write([]byte(status + "\n"))
 	if err != nil {
+		_ = c.statusVSerial.Close()
+		c.statusVSerial = nil
+
 		return err
 	}
 
