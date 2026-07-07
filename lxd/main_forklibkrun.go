@@ -265,6 +265,18 @@ func (c *cmdForklibkrun) run(_ *cobra.Command, _ []string) error {
 		return fmt.Errorf("Failed configuring console: %w", err)
 	}
 
+	// Add a separate multi-port virtio-console for named service ports used by
+	// lxd-agent activation plumbing.
+	activationConsoleID, err := ctx.AddVirtioConsoleMultiport()
+	if err != nil {
+		return fmt.Errorf("Failed adding activation multi-port console: %w", err)
+	}
+
+	err = ctx.AddConsolePortInout(activationConsoleID, "com.canonical.lxd", -1, -1)
+	if err != nil {
+		return fmt.Errorf("Failed configuring lxd-agent activation port: %w", err)
+	}
+
 	// Configure the kernel, initrd and command line.
 	err = ctx.SetKernel(c.flagKernel, kernelFormat, c.flagInitrd, c.flagCmdline)
 	if err != nil {
