@@ -26,6 +26,7 @@ type cmdForklibkrun struct {
 	flagInitrd      string
 	flagCmdline     string
 	flagRootDisk    string
+	flagConfigDrive string
 	flagConsolePath string
 	flagNICs        []string
 	flagLXDPath     string
@@ -55,6 +56,7 @@ func (c *cmdForklibkrun) command() *cobra.Command {
 	cmd.Flags().StringVar(&c.flagInitrd, "initrd", "", "Path to the initrd image")
 	cmd.Flags().StringVar(&c.flagCmdline, "cmdline", "", "Kernel command line")
 	cmd.Flags().StringVar(&c.flagRootDisk, "root-disk", "", "Path to the root disk image")
+	cmd.Flags().StringVar(&c.flagConfigDrive, "config-drive", "", "Path to the config drive directory to expose via virtio-fs")
 	cmd.Flags().StringVar(&c.flagConsolePath, "console", "", "Path to the console socket to expose")
 
 	cmd.Flags().StringArrayVar(&c.flagNICs, "net", nil, "Network interface as \"tap_name,hwaddr\" (repeatable)")
@@ -164,6 +166,10 @@ func (c *cmdForklibkrun) run(_ *cobra.Command, _ []string) error {
 		return errors.New("Missing required --root-disk argument")
 	}
 
+	if c.flagConfigDrive == "" {
+		return errors.New("Missing required --config-drive argument")
+	}
+
 	if c.flagConsolePath == "" {
 		return errors.New("Missing required --console argument")
 	}
@@ -255,6 +261,12 @@ func (c *cmdForklibkrun) run(_ *cobra.Command, _ []string) error {
 	err = ctx.AddDisk("root", c.flagRootDisk, false)
 	if err != nil {
 		return fmt.Errorf("Failed configuring root disk: %w", err)
+	}
+
+	// Expose the config drive over virtio-fs with the "config" tag expected by lxd-agent.
+	err = ctx.AddVirtioFS3("config", c.flagConfigDrive, 0, true)
+	if err != nil {
+		return fmt.Errorf("Failed configuring config drive virtio-fs: %w", err)
 	}
 
 	// Add network interfaces backed by host TAP devices. libkrun opens the named TAP device
