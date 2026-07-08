@@ -267,7 +267,7 @@ func (c *cmdForklibkrun) run(_ *cobra.Command, _ []string) error {
 				line := strings.TrimRight(string(lineBuf[:lineEnd]), "\r")
 				if strings.Contains(line, haltedLine) {
 					fmt.Fprintln(os.Stderr, "Guest reported halted state, stopping forklibkrun")
-					os.Exit(0)
+					os.Exit(1) // Used to differentiate from reboot which exits with 0.
 				}
 
 				lineBuf = lineBuf[lineEnd+1:]
@@ -275,7 +275,7 @@ func (c *cmdForklibkrun) run(_ *cobra.Command, _ []string) error {
 
 			if strings.Contains(string(lineBuf), haltedLine) {
 				fmt.Fprintln(os.Stderr, "Guest reported halted state, stopping forklibkrun")
-				os.Exit(0)
+				os.Exit(1) // Used to differentiate from reboot which exits with 0.
 			}
 
 			consoleConnMu.Lock()
