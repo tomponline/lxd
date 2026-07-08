@@ -247,11 +247,35 @@ func (c *cmdForklibkrun) run(_ *cobra.Command, _ []string) error {
 
 	// Always drain the PTY master so guest writes never block when no client is attached.
 	go func() {
+		const haltedLine = "reboot: Power off not available: System halted instead"
+
 		buf := make([]byte, 32768)
+		lineBuf := make([]byte, 0, 4096)
 		for {
 			n, err := ptx.Read(buf)
 			if err != nil {
 				return
+			}
+
+			lineBuf = append(lineBuf, buf[:n]...)
+			for {
+				lineEnd := bytes.IndexByte(lineBuf, '\n')
+				if lineEnd == -1 {
+					break
+				}
+
+				line := strings.TrimRight(string(lineBuf[:lineEnd]), "\r")
+				if strings.Contains(line, haltedLine) {
+					fmt.Fprintln(os.Stderr, "Guest reported halted state, stopping forklibkrun")
+					os.Exit(0)
+				}
+
+				lineBuf = lineBuf[lineEnd+1:]
+			}
+
+			if strings.Contains(string(lineBuf), haltedLine) {
+				fmt.Fprintln(os.Stderr, "Guest reported halted state, stopping forklibkrun")
+				os.Exit(0)
 			}
 
 			consoleConnMu.Lock()
