@@ -1482,9 +1482,28 @@ func (d *microvm) monitorLibkrunProcess(pid int) {
 			return
 		}
 
+		exitCtx := logger.Ctx{"pid": pid}
+		exitCode, hasExitCode, infoErr := linux.PidfdGetExitInfo(int(pidFdFile.Fd()))
+		if infoErr != nil {
+			exitCtx["exitInfoErr"] = infoErr
+		} else if hasExitCode {
+			exitCtx["exitCode"] = exitCode
+			waitStatus := syscall.WaitStatus(exitCode)
+
+			if waitStatus.Exited() {
+				exitCtx["exitStatus"] = waitStatus.ExitStatus()
+			}
+
+			if waitStatus.Signaled() {
+				signal := waitStatus.Signal()
+				exitCtx["exitSignal"] = signal
+				exitCtx["exitSignalName"] = unix.SignalName(signal)
+			}
+		}
+
 		// Unexpected exit: trigger full instance cleanup. onStopOperationSetup will
 		// create a new instance-initiated operation since no Stop() is in flight.
-		d.logger.Debug("libkrun process exited unexpectedly, triggering instance cleanup", logger.Ctx{"pid": pid})
+		d.logger.Debug("libkrun process exited unexpectedly, triggering instance cleanup", exitCtx)
 
 		err = d.onStop(context.Background(), "stop")
 		if err != nil {
