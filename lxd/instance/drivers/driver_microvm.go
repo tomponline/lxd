@@ -851,7 +851,7 @@ func (d *microvm) Start(ctx context.Context, stateful bool, progressReporter iop
 	// virtio-console (hvc0) device wired up in generateMicroVMConfigFile. Avoid earlyprintk=virtio
 	// (not a valid earlyprintk backend) and avoid reboot=t/panic=-1, which would silently
 	// triple-fault reboot-loop (100% CPU, no output) if the guest panics before hvc0 comes up.
-	kernelAppend := "console=hvc0 root=/dev/vda rootfstype=ext4 rw"
+	kernelAppend := "console=hvc0 root=/dev/vda rootfstype=ext4 rw dummy.numdummies=0"
 	if extraAppend := d.getKernelAppend(); extraAppend != "" {
 		kernelAppend = kernelAppend + " " + extraAppend
 	}
