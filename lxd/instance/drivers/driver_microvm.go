@@ -1501,15 +1501,139 @@ func (d *microvm) monitorLibkrunProcess(pid int) {
 			}
 		}
 
+		target := d.libkrunOnStopTarget(exitCode, hasExitCode)
+		exitCtx["target"] = target
+
 		// Unexpected exit: trigger full instance cleanup. onStopOperationSetup will
 		// create a new instance-initiated operation since no Stop() is in flight.
 		d.logger.Debug("libkrun process exited unexpectedly, triggering instance cleanup", exitCtx)
 
-		err = d.onStop(context.Background(), "stop")
+		err = d.onStop(context.Background(), target)
 		if err != nil {
 			d.logger.Error("Failed running onStop after unexpected libkrun exit", logger.Ctx{"err": err})
 		}
 	}()
+}
+
+// libkrunOnStopTarget returns the onStop target for a libkrun helper exit.
+// Exit status 0 is treated as a reboot, while exit status 1 and all other
+// exit conditions are treated as a stop.
+func (d *microvm) libkrunOnStopTarget(exitCode int, hasExitCode bool) string {
+	if !hasExitCode {
+		return "stop"
+	}
+
+	waitStatus := syscall.WaitStatus(exitCode)
+	if waitStatus.Exited() && waitStatus.ExitStatus() == 0 {
+		return "reboot"
+	}
+
+	return "stop"
+}
+
+// cleanupLibkrunRuntimeFiles removes the helper runtime files created for a libkrun VM.
+func (d *microvm) cleanupLibkrunRuntimeFiles() {
+	_ = os.Remove(d.libkrunPidFilePath())
+	_ = os.Remove(d.libkrunConsolePath())
+	_ = os.Remove(d.libkrunAgentSocketPath())
+}
+
+// onStop is run when the instance stops.
+func (d *microvm) onStop(ctx context.Context, target string) error {
+	d.logger.Debug("onStop hook started", logger.Ctx{"target": target})
+	defer d.logger.Debug("onStop hook finished", logger.Ctx{"target": target})
+
+	// Create/pick up operation.
+	op, err := d.onStopOperationSetup(target)
+	if err != nil {
+		return err
+	}
+
+	// Unlock on return.
+	defer op.Done(nil)
+
+	if d.isLibkrun() {
+		d.cleanupLibkrunRuntimeFiles()
+	}
+
+	// Wait for the VM process to finish (to avoid racing start when restarting).
+	d.logger.Debug("Waiting for VM process to finish")
+	waitTimeout := time.Minute * 5
+	if d.pidWait(waitTimeout) {
+		d.logger.Debug("VM process finished")
+	} else {
+		// Log a warning, but continue clean up as best we can.
+		d.logger.Error("VM process failed stopping", logger.Ctx{"timeout": waitTimeout})
+	}
+
+	// Record power state.
+	err = d.VolatileSet(map[string]string{
+		"volatile.last_state.power": instance.PowerStateStopped,
+		"volatile.last_state.ready": "false",
+	})
+	if err != nil {
+		// Don't return an error here as we still want to cleanup the instance even if DB not available.
+		d.logger.Error("Failed recording last power state", logger.Ctx{"err": err})
+	}
+
+	// Cleanup.
+	d.cleanupDevices() // Must be called before unmount.
+	_ = os.Remove(d.pidFilePath())
+	_ = os.Remove(d.monitorPath())
+
+	// Stop the storage for the instance.
+	err = d.unmount()
+	if err != nil && !errors.Is(err, storageDrivers.ErrInUse) {
+		// If we are migrating an instance and receive status locked error (indicating the device or
+		// resource is busy) during unmount while LXD_TEST_LIVE_MIGRATION_ON_THE_SAME_HOST is set, we
+		// ignore the error.
+		isLiveMigrationTest := shared.IsTrue(os.Getenv("LXD_TEST_LIVE_MIGRATION_ON_THE_SAME_HOST"))
+
+		//nolint:revive // Ignore early-return for clarity.
+		if isLiveMigrationTest && op.Action() == operationlock.ActionMigrate && api.StatusErrorCheck(err, http.StatusLocked) {
+			d.logger.Warn("Failed unmounting source instance during migration", logger.Ctx{"err": err})
+		} else {
+			err = fmt.Errorf("Failed unmounting instance: %w", err)
+			op.Done(err)
+			return err
+		}
+	}
+
+	// Unload the apparmor profile.
+	err = apparmor.InstanceUnload(d.state.OS, d)
+	if err != nil {
+		op.Done(err)
+		return err
+	}
+
+	// Log and emit lifecycle if not user triggered.
+	if op.GetInstanceInitiated() {
+		d.state.Events.SendLifecycle(d.project.Name, lifecycle.InstanceShutdown.Event(ctx, d, nil))
+	} else if op.Action() != operationlock.ActionMigrate {
+		d.state.Events.SendLifecycle(d.project.Name, lifecycle.InstanceStopped.Event(ctx, d, nil))
+	}
+
+	// Reboot the instance.
+	if target == "reboot" {
+		// Progress tracking here is not useful. We are in the on stop hook, which is called via lxc hook, so
+		// progress reporting would not be returned to the original client.
+		err = d.Start(ctx, false, nil)
+		if err != nil {
+			op.Done(err)
+			return err
+		}
+
+		d.state.Events.SendLifecycle(d.project.Name, lifecycle.InstanceRestarted.Event(ctx, d, nil))
+	} else if d.ephemeral {
+		// Destroy ephemeral virtual machines.
+		err = d.delete(ctx, true)
+		if err != nil {
+			op.Done(err)
+			return err
+		}
+	}
+
+	return nil
 }
 
 // stopLibkrunMonitor deregisters the active pidfd watcher for this instance so that a
@@ -1689,9 +1813,7 @@ func (d *microvm) stopLibkrun(ctx context.Context, op *operationlock.InstanceOpe
 	}
 
 	// Clean up PID file, console socket, and per-VM agent socket.
-	_ = os.Remove(d.libkrunPidFilePath())
-	_ = os.Remove(d.libkrunConsolePath())
-	_ = os.Remove(d.libkrunAgentSocketPath())
+	d.cleanupLibkrunRuntimeFiles()
 
 	// Wait for onStop to complete device cleanup.
 	err := d.onStop(ctx, "stop")
