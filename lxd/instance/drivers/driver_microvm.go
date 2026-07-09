@@ -2441,3 +2441,8 @@ func (d *microvm) Stop(ctx context.Context, stateful bool) error {
 
 	return nil
 }
+
+// Restart restart the instance.
+func (d *microvm) Restart(ctx context.Context, timeout time.Duration, progressReporter ioprogress.ProgressReporter) error {
+	return d.restartCommon(ctx, d, timeout, progressReporter)
+}
