@@ -1844,6 +1844,15 @@ Additional kernel command line arguments to pass when booting the microvm.
 Path to the host kernel to use for booting the microvm.
 ```
 
+```{config:option} microvm.runtime instance-microvm
+:condition: "microvm"
+:defaultdesc: "`qemu`"
+:liveupdate: "no"
+:shortdesc: "Hypervisor runtime (`qemu`, `ch` or `libkrun`)"
+:type: "string"
+The hypervisor runtime to use for the microvm.
+```
+
 <!-- config group instance-microvm end -->
 <!-- config group instance-migration start -->
 ```{config:option} migration.incremental.memory instance-migration
