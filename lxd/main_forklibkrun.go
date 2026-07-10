@@ -13,7 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	libkrun "github.com/canonical/lxd/go-libkrun"
+	"github.com/canonical/lxd/lxd/instance/drivers/libkrun"
 	"github.com/canonical/lxd/shared"
 )
 
