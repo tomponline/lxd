@@ -2109,6 +2109,16 @@
 							"shortdesc": "Path to the host kernel for booting",
 							"type": "string"
 						}
+					},
+					{
+						"microvm.runtime": {
+							"condition": "microvm",
+							"defaultdesc": "`qemu`",
+							"liveupdate": "no",
+							"longdesc": "The hypervisor runtime to use for the microvm.",
+							"shortdesc": "Hypervisor runtime (`qemu`, `ch` or `libkrun`)",
+							"type": "string"
+						}
 					}
 				]
 			},
