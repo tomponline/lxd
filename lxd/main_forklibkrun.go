@@ -214,6 +214,8 @@ func (c *cmdForklibkrun) run(_ *cobra.Command, _ []string) error {
 		return fmt.Errorf("Failed creating libkrun context: %w", err)
 	}
 
+	defer ctx.Close()
+
 	// Configure vCPUs and memory.
 	err = ctx.SetVMConfig(uint8(cpus), uint32(memMiB))
 	if err != nil {
