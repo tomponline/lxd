@@ -868,7 +868,7 @@ func (d *microvm) Start(ctx context.Context, stateful bool, progressReporter iop
 	// Setup virtiofsd for the config drive mount path. The lxd-agent uses virtio-fs to access its
 	// configuration and certificates. There is no 9p fallback for microvm.
 	configSockPath, configPIDPath := d.configVirtiofsdPaths()
-	virtiofsdRevert, unixListener, err := device.DiskVMVirtiofsdStart(d, configSockPath, configPIDPath, "", configMntPath, nil, 0)
+	virtiofsdRevert, err := device.DiskVMVirtiofsdStart(d, configSockPath, configPIDPath, "", configMntPath, nil, 0)
 	if err != nil {
 		err = fmt.Errorf("Failed setting up virtiofsd for config drive: %w", err)
 		op.Done(err)
@@ -876,9 +876,6 @@ func (d *microvm) Start(ctx context.Context, stateful bool, progressReporter iop
 	}
 
 	revert.Add(virtiofsdRevert)
-
-	// Request the unix listener is closed after QEMU has connected on startup.
-	defer func() { _ = unixListener.Close() }()
 
 	// Generate MicroVM QEMU config.
 	confFile, err := d.generateMicroVMConfigFile(vsockFD, rootDiskPath, configSockPath, memSizeMB, nics, &fdFiles)
